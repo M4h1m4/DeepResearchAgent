@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     openai_api_key: str
     openai_model: str = "gpt-4-turbo-preview"
     embedding_model: str = "text-embedding-3-small"
+    llm_temperature: float = 0.7  # LLM temperature (0.0 = deterministic, 1.0 = creative)
 
     database_url: str = "sqlite:///./data/rag_metadata.db"
 

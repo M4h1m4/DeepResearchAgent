@@ -1,13 +1,13 @@
-import os
 import aiofiles
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.rag_service import RAGService
-from app.schemas import DocumentUploadResponse, DocumentResponse, QueryRequest, QueryResponse
+from app.schemas import DocumentMetadata, RAGQuery, QueryResponse
 from app.models import Document
+from app.document_processor import FileType
 
 from config import settings 
 from config.logging_config import get_logger 
@@ -16,13 +16,13 @@ router = APIRouter()
 rag_service = RAGService()
 logger = get_logger(__name__)
 
-os.makedirs("data/documents", exist_ok=True)
-os.makedirs("data/chroma_db", exist_ok=True)
+# os.makedirs("data/documents", exist_ok=True)
+# os.makedirs("data/chroma_db", exist_ok=True)
 
-@router.post("/documents/upload", response_model=DocumentUploadResponse)
+@router.post("/documents/upload", response_model=DocumentMetadata)
 async def upload_document(
     file: UploadFile = File(...),
-    title: str = Form(None), 
+    title: Optional[str] = Form(None), 
     db: Session = Depends(get_db)
 ):
     logger.info(
@@ -34,15 +34,17 @@ async def upload_document(
         }
     )
     try: 
-        file_type = file.filename.split(".")[-1].lower() if file.filename else ""
-        if file_type not in ["pdf", "txt", "doc", "docx"]:
+        file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
+        try:
+            file_type = FileType(file_ext)
+        except ValueError:
             logger.warning(
                 "Unsupported file type",
-                extra={"file_type": file_type, "uploaded_filename": file.filename}
+                extra={"file_type": file_ext, "uploaded_filename": file.filename}
             )
             raise HTTPException(
                 status_code=400, 
-                detail=f"Unsupported file type: {file_type}. Supported: pdf, txt, docx"
+                detail=f"Unsupported file type: {file_ext}. Supported: {', '.join([ft.value for ft in FileType])}"
             )
         
         file_path = f"data/documents/{file.filename}"
@@ -67,10 +69,7 @@ async def upload_document(
             extra={"document_id": document.id, "title": document.title}
         )
 
-        return DocumentUploadResponse(
-            message="Document uploaded and ingested successfully",
-            document=DocumentResponse.model_validate(document) 
-        )
+        return DocumentMetadata.model_validate(document)
 
     except HTTPException:
         raise 
@@ -83,14 +82,14 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
 
     
-@router.get("/documents", response_model=List[DocumentResponse])
+@router.get("/documents", response_model=List[DocumentMetadata])
 def list_documents(skip: int=0, limit: int = 100, db: Session=Depends(get_db)):
     logger.info("Listing documents", extra={"skip": skip, "limit": limit})
     documents = db.query(Document).offset(skip).limit(limit).all()
     logger.debug("Documents retrieved", extra={"count": len(documents)})
-    return [DocumentResponse.model_validate(doc) for doc in documents]  
+    return [DocumentMetadata.model_validate(doc) for doc in documents]  
 
-@router.get("/documents/{document_id}", response_model=DocumentResponse)
+@router.get("/documents/{document_id}", response_model=DocumentMetadata)
 def get_document(document_id: int, db: Session = Depends(get_db)):
     logger.info("Getting document", extra={"document_id": document_id})
     document = db.query(Document).filter(Document.id == document_id).first()
@@ -98,7 +97,7 @@ def get_document(document_id: int, db: Session = Depends(get_db)):
         logger.warning("Document not found", extra={"document_id": document_id})
         raise HTTPException(status_code=404, detail="Document not found")
     logger.debug("Document retrieved", extra={"document_id": document_id, "title": document.title})
-    return DocumentResponse.model_validate(document)  
+    return DocumentMetadata.model_validate(document)  
 
 @router.delete("/documents/{document_id}")
 def delete_document(document_id: int, db: Session=Depends(get_db)):
@@ -111,7 +110,7 @@ def delete_document(document_id: int, db: Session=Depends(get_db)):
     return {"message": "Document deleted successfully"}
 
 @router.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest, db: Session=Depends(get_db)):
+def query(request: RAGQuery, db: Session=Depends(get_db)):
     logger.info(
         "Query request received",
         extra={

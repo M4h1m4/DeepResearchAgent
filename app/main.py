@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+import os 
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,11 +13,30 @@ from app.api.routes import router
 setup_json_logging(log_level=settings.environment.upper() if hasattr(settings, 'environment') else "INFO")
 logger = get_logger(__name__)
 
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Application startup - creating directories")
+    data_dirs = [
+        "data/documents",
+        "data/chroma_db"
+    ]
+    for dir_path in data_dirs:
+        os.makedirs(dir_path, exist_ok=True)
+        logger.debug(f"Directory ensured: {dir_path}", extra={"directory": dir_path})
+    logger.info("Application startup completed - directories created")
+    
+    yield
+    
+    logger.info("Application shutdown initiated")
+
 # Create FastAPI app
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="Deep Research Agent - Phase 1 Fast RAG API"
+    description="Deep Research Agent - Phase 1 Fast RAG API",
+    lifespan=lifespan
 )
 
 # CORS middleware
