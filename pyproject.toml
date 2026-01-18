@@ -1,0 +1,74 @@
+[project]
+name = "DeepResearchAgent"
+version = "1.0.0"
+description = "Deep Research Agent - Phase 1 Fast RAG System"
+requires-python = ">=3.9"
+dependencies = [
+    # FastAPI & Web
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0",
+    "python-multipart==0.0.6",
+    
+    # Database
+    "sqlalchemy>=2.0.36",  # Updated for Python 3.13 compatibility
+    "alembic>=1.13.0",
+    
+    # Vector Database
+    "chromadb>=0.5.0",  # Updated for NumPy 2.0 compatibility
+    "numpy<2.0",  # Pin NumPy < 2.0 until ChromaDB fully supports NumPy 2.0
+    
+    # LLM & Embeddings
+    "openai",
+    "langchain",
+    "langchain-openai",
+    "langchain-community",  # Required for Chroma vectorstore
+    "langchain-core",  # Required for prompts and messages
+    "langchain-text-splitters",  # Required for text splitters
+    "langchain-chroma",  # Required for Chroma vectorstore (new package)
+    
+    # Document Processing
+    "pypdf==3.17.4",
+    "python-docx==1.1.0",
+    
+    # Utilities
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "python-dotenv==1.0.0",
+    "aiofiles==23.2.1",
+    "python-json-logger==2.0.7",  # JSON formatted logging
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==7.4.3",
+    "pytest-asyncio==0.21.1",
+    "httpx==0.25.2",
+    "black==23.12.0",
+    "ruff==0.1.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Configure hatchling to find packages in 'app' and 'config' directories
+[tool.hatch.build.targets.wheel]
+packages = ["app", "config"]
+
+# Use dependency-groups instead of deprecated tool.uv.dev-dependencies
+[dependency-groups]
+dev = [
+    "pytest==7.4.3",
+    "pytest-asyncio==0.21.1",
+    "httpx==0.25.2",
+    "black==23.12.0",
+    "ruff==0.1.8",
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
