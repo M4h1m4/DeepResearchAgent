@@ -1,7 +1,7 @@
 [project]
 name = "DeepResearchAgent"
 version = "1.0.0"
-description = "Deep Research Agent - Phase 1 Fast RAG System"
+description = "Deep Research Agent - Fast RAG and Deep Research Mode System"
 requires-python = ">=3.9"
 dependencies = [
     # FastAPI & Web
@@ -25,6 +25,7 @@ dependencies = [
     "langchain-core",  # Required for prompts and messages
     "langchain-text-splitters",  # Required for text splitters
     "langchain-chroma",  # Required for Chroma vectorstore (new package)
+    "langgraph>=0.0.20",  # Required for Phase 2: Deep Research Mode (state machine orchestration)
     
     # Document Processing
     "pypdf==3.17.4",

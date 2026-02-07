@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     openai_api_key: str
     openai_model: str = "gpt-4-turbo-preview"
     embedding_model: str = "text-embedding-3-small"
+    llm_temperature: float = 0.7  # LLM temperature (0.0 = deterministic, 1.0 = creative)
 
     database_url: str = "sqlite:///./data/rag_metadata.db"
 
@@ -19,6 +20,8 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 5
     similarity_threshold: float = 0.3  # Cosine similarity threshold (0.3 = 30% similarity, accepts distance up to 0.7) 
 
+    max_iterations: int = 3  # Reduced from 5 for faster responses
+    deep_research_top_k: int = 6  # Optimized top_k for deep research (fewer chunks per query)
     class Config:
         env_file =".env"
         case_sensitive = False 

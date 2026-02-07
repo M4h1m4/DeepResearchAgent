@@ -11,7 +11,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from config import settings 
 from config.logging_config import get_logger 
 from app.models import Document, Chunk, QueryLog
-from app.services.document_service import DocumentProcessor
+from app.document_processor import DocumentProcessor, FileType
 from app.services.vector_service import VectorStore
 
 logger = get_logger(__name__)
@@ -22,7 +22,7 @@ class RAGService:
         self.vector_store = VectorStore()
         self.llm = ChatOpenAI(
             model=settings.openai_model, 
-            temperature=0.7, 
+            temperature=settings.llm_temperature, 
             openai_api_key=settings.openai_api_key,
         )
         self._setup_prompts()
@@ -50,7 +50,7 @@ class RAGService:
         db: Session, 
         file_path: str, 
         title: str, 
-        file_type: str,
+        file_type: FileType,
         metadata: Optional[Dict] = None
     ) -> Document: 
     #Ingest a document into the database and return a database object
