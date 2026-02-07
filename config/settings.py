@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 5
     similarity_threshold: float = 0.3  # Cosine similarity threshold (0.3 = 30% similarity, accepts distance up to 0.7) 
 
+    max_iterations: int = 3  # Reduced from 5 for faster responses
+    deep_research_top_k: int = 6  # Optimized top_k for deep research (fewer chunks per query)
     class Config:
         env_file =".env"
         case_sensitive = False 

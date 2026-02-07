@@ -4,7 +4,13 @@ import uuid
 import chromadb
 from chromadb.config import Settings as ChromaSettings 
 from langchain_openai import OpenAIEmbeddings 
-from langchain.vectorstores import Chroma 
+try:
+    from langchain_chroma import Chroma
+except ImportError:
+    try:
+        from langchain_community.vectorstores import Chroma
+    except ImportError:
+        from langchain.vectorstores import Chroma 
 
 from config import settings 
 from config.logging_config import get_logger 
@@ -99,7 +105,7 @@ class VectorStore:
         )
 
         try:
-            self.vectorstore.add_texts(
+            self.vectorstore.add_texts( #Embeddings are created here
                 texts=texts, 
                 metadatas=metadatas, 
                 ids=ids

@@ -12,7 +12,6 @@ class DocumentBase(BaseModel):
 class DocumentCreate(DocumentBase):
     pass
 
-
 class DocumentMetadata(DocumentBase):
     id: int
     file_size: Optional[int]
@@ -23,6 +22,7 @@ class DocumentMetadata(DocumentBase):
 
 class RAGQuery(BaseModel):
     query: str = Field(..., description="User query")
+    mode: Optional[str] = Field("fast", description="Query mode: 'fast' or 'deep'")
     top_k: Optional[int] = Field(None, description="Number of chunks to retrieve")
     filter_dict: Optional[Dict] = Field(None, description="Metadata filters")
 
@@ -38,3 +38,6 @@ class QueryResponse(BaseModel):
     sources: List[SourceInfo] = Field(default_factory=list, description="Source documents")
     retrieved_chunks: List[int] = Field(default_factory=list, description="Retrieved chunk IDs")
     response_time_ms: int = Field(..., description="Response time in milliseconds")
+    research_metadata: Optional[Dict] = Field(default=None, description="Additional metadata for deep research mode")
+
+
