@@ -10,6 +10,8 @@ from app.models import Document, QueryLog
 from app.document_processor import FileType
 from app.services.deep_research_service import DeepResearchService
 from app.schemas import SourceInfo
+from app.evals.runners import EvaluationRunner
+from app.evals.datasets import DatasetManager, EvaluationDataset
 
 from config import settings 
 from config.logging_config import get_logger 
@@ -17,6 +19,11 @@ from config.logging_config import get_logger
 router = APIRouter()
 rag_service = RAGService()
 deep_research_service = DeepResearchService()
+
+evaluation_runner = EvaluationRunner()
+dataset_manager = DatasetManager()
+
+
 logger = get_logger(__name__)
 
 # os.makedirs("data/documents", exist_ok=True)
@@ -195,21 +202,21 @@ async def query(request: RAGQuery, mode: str = "fast", db: Session=Depends(get_d
         if mode == "deep":
             return await deep_research_query(request, db)
         else:
-            result = rag_service.query(
-                db=db, 
-                query=request.query,
-                top_k=request.top_k, 
-                filter_dict=request.filter_dict
-            )
-            logger.info(
-                "Query processed successfully",
-                extra={
+        result = rag_service.query(
+            db=db, 
+            query=request.query,
+            top_k=request.top_k, 
+            filter_dict=request.filter_dict
+        )
+        logger.info(
+            "Query processed successfully",
+            extra={
                     "mode": mode,
-                    "response_time_ms": result.get("response_time_ms"),
-                    "chunk_count": len(result.get("retrieved_chunks", []))
-                }
-            )
-            return QueryResponse(**result)
+                "response_time_ms": result.get("response_time_ms"),
+                "chunk_count": len(result.get("retrieved_chunks", []))
+            }
+        )
+        return QueryResponse(**result)
     except Exception as e:
         logger.error(
             "Error processing query",
@@ -217,7 +224,7 @@ async def query(request: RAGQuery, mode: str = "fast", db: Session=Depends(get_d
                 "query": request.query[:200], 
                 "error": str(e)
             },
-            exc_info=True
+                exc_info=True
         )
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
@@ -228,3 +235,58 @@ def health_check():
         "app_name": settings.app_name,
         "version": settings.app_version
     }
+
+@router.post("/evals/fast-rag")
+def evaluate_fast_rag(
+    dataset_name: Optional[str] = None, 
+    dataset: Optional[Dict] = None, 
+    db: Session = Depends(get_db)
+): 
+    if dataset:
+        eval_dataset = EvaluationDataset.from_dict(dataset)
+    else:
+        eval_dataset = None
+    
+    results = evaluation_runner.run_fast_rag_evaluation(
+        dataset_name=dataset_name,
+        dataset=eval_dataset
+    )
+    return results
+
+@router.post("/evals/deep-research")
+def evaluate_deep_research(
+    dataset_name: Optional[str] = None,
+    dataset: Optional[Dict] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Recommended dataset: "hotpot_qa" (multi-hop Q&A requiring reasoning)
+    Example: POST /evals/deep-research?dataset_name=hotpot_qa
+    """
+    if dataset:
+        eval_dataset = EvaluationDataset.from_dict(dataset)
+    else:
+        eval_dataset = None
+    
+    results = evaluation_runner.run_deep_research_evaluation(
+        dataset_name=dataset_name,
+        dataset=eval_dataset
+    )
+    return results
+
+@router.post("/evals/compare")
+def compare_modes(
+    dataset_name: Optional[str] = None,
+    dataset: Optional[Dict] = None,
+    db: Session = Depends(get_db)
+):
+    if dataset:
+        eval_dataset = EvaluationDataset.from_dict(dataset)
+    else:
+        eval_dataset = None
+    
+    results = evaluation_runner.compare_modes(
+        dataset_name=dataset_name,
+        dataset=eval_dataset
+    )
+    return results

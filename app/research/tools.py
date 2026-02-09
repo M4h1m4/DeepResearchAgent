@@ -8,6 +8,7 @@ from langchain_core.tools import tool, ToolException
 
 from app.services.rag_service import RAGService
 from app.database import db
+from config import settings
 from config.logging_config import get_logger 
 
 logger = get_logger(__name__)
@@ -55,7 +56,7 @@ def research_rag_tool(query: str) -> Dict[str, Any]:
         rag_service = get_rag_service()
         with get_db_session() as session:
             # Use optimized top_k for deep research mode
-            top_k = getattr(settings, 'deep_research_top_k', 6)
+            top_k = settings.deep_research_top_k
             result = rag_service.query(
                 db=session,
                 query=query, 

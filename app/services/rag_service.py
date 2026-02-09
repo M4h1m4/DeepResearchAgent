@@ -201,8 +201,8 @@ class RAGService:
             max_distance = 1 - settings.similarity_threshold  # Convert similarity threshold to max distance
             # For cosine distance, accept results with distance <= max_distance
             # But if all results are above max_distance, use the best ones anyway
-            filtered_results = [
-                r for r in results
+        filtered_results = [
+            r for r in results
                 if r["distance"] <= max_distance
             ]
             # If nothing passes threshold but we have results, use the best one anyway
@@ -282,7 +282,7 @@ class RAGService:
             messages = [
                 SystemMessage(content=self.system_template),
                 HumanMessage(content=self.human_template.format(context=context, question=query))
-            ]
+        ]
 
         response = self.llm(messages)
         answer = response.content 

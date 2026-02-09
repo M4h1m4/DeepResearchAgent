@@ -10,7 +10,7 @@ except ImportError:
     try:
         from langchain_community.vectorstores import Chroma
     except ImportError:
-        from langchain.vectorstores import Chroma 
+from langchain.vectorstores import Chroma 
 
 from config import settings 
 from config.logging_config import get_logger 
@@ -106,13 +106,13 @@ class VectorStore:
 
         try:
             self.vectorstore.add_texts( #Embeddings are created here
-                texts=texts, 
-                metadatas=metadatas, 
-                ids=ids
-            )
-            logger.info(
-                "Documents added to vector store",
-                extra={"chunk_count": len(ids), "vector_ids": ids[:5]}  # Log first 5 IDs
+            texts=texts, 
+            metadatas=metadatas, 
+            ids=ids
+        )
+        logger.info(
+            "Documents added to vector store",
+            extra={"chunk_count": len(ids), "vector_ids": ids[:5]}  # Log first 5 IDs
             )
         except Exception as e:
             logger.error(
@@ -149,7 +149,7 @@ class VectorStore:
                 "collection_count": collection_count
             }
         )
-        
+
         if collection_count == 0:
             logger.warning("Vector store collection is empty - no documents have been indexed")
             return []
@@ -165,9 +165,9 @@ class VectorStore:
         # Note: Chroma filtering syntax may vary - this uses metadata-based filtering
         try:
             if filter_metadata:
-                results = self.vectorstore.similarity_search_with_score(
-                    query,
-                    k=top_k,
+        results = self.vectorstore.similarity_search_with_score(
+            query,
+            k=top_k, 
                     filter=filter_metadata
                 )
             else:
@@ -184,7 +184,7 @@ class VectorStore:
             results = self.vectorstore.similarity_search_with_score(
                 query,
                 k=top_k
-            )
+        )
 
         logger.debug(
             "Vector search completed",

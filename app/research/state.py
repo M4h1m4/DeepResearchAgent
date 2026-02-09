@@ -13,7 +13,7 @@ class ResearchState(TypedDict):
 
     sub_queries : Annotated[List[str], operator.add]
 
-    findings: Annotated[List[str], operator.add] #contains queries, answers, chunks, sources in each step
+    findings: Annotated[List[Dict], operator.add] #contains queries, answers, chunks, sources in each step
     synthesis: str # current summary of all findings 
 
     knowledge_gaps: Annotated[List[str], operator.add]

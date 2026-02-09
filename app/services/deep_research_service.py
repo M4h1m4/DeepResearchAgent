@@ -33,7 +33,7 @@ class DeepResearchService:
             "synthesis": "", 
             "knowledge_gaps": [], 
             "iteration_count": 0, 
-            "should_continue": False, 
+            "should_continue": True,  # Start with True to allow research to begin
             "final_answer": None
         }
 

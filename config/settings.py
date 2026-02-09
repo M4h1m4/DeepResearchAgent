@@ -20,8 +20,11 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 5
     similarity_threshold: float = 0.3  # Cosine similarity threshold (0.3 = 30% similarity, accepts distance up to 0.7) 
 
-    max_iterations: int = 3  # Reduced from 5 for faster responses
+    max_research_iterations: int = 3  # Maximum iterations for deep research mode
     deep_research_top_k: int = 6  # Optimized top_k for deep research (fewer chunks per query)
+    deep_research_temperature: float = 0.7  # Temperature for deep research synthesis
+    research_planning_temperature: float = 0.3  # Temperature for research planning (more deterministic)
+    gap_analysis_temperature: float = 0.4  # Temperature for gap analysis
     class Config:
         env_file =".env"
         case_sensitive = False 
