@@ -22,7 +22,7 @@ def plan_research(state : ResearchState) -> Dict[str, Any]:
 
     llm = ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.3, #more deterministic for planning
+        temperature=settings.research_planning_temperature,
         openai_api_key=settings.openai_api_key
     )
 
@@ -116,7 +116,7 @@ def generate_sub_query(state: ResearchState) -> Dict[str, Any]:
     )
     llm = ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.5,
+        temperature=settings.research_planning_temperature,  # Use planning temperature for sub-query generation
         openai_api_key=settings.openai_api_key
     )
 
@@ -287,7 +287,7 @@ def synthesize_findings(state: ResearchState) -> Dict[str, Any]:
     
     llm = ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.7,
+        temperature=settings.deep_research_temperature,
         openai_api_key=settings.openai_api_key
     )
     findings_text = ""
@@ -376,7 +376,7 @@ def analyze_gaps(state: ResearchState) -> Dict[str, Any]:
         }
     )
 
-    max_iterations = settings.max_iterations  # Use settings value (default 3)
+    max_iterations = settings.max_research_iterations  # Use settings value (default 3)
     if state["iteration_count"] >= max_iterations:
         logger.info(
             "Maximum iterations reached",
@@ -392,7 +392,7 @@ def analyze_gaps(state: ResearchState) -> Dict[str, Any]:
         } 
     llm = ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.4,
+        temperature=settings.gap_analysis_temperature,
         openai_api_key=settings.openai_api_key
     )
     gap_analysis_prompt = f"""Analyze if the current research synthesis fully addresses the original query.
@@ -498,7 +498,7 @@ def final_synthesis(state: ResearchState) -> Dict[str, Any]:
     
     llm = ChatOpenAI(
         model=settings.openai_model,
-        temperature=0.7,
+        temperature=settings.deep_research_temperature,
         openai_api_key=settings.openai_api_key
     )
     
