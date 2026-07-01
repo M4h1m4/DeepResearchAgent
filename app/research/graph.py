@@ -1,9 +1,9 @@
-from typing import Literal 
+from typing import Literal
 from enum import Enum
 from langgraph.graph import StateGraph
-from langgraph.checkpoint.memory import MemorySaver 
+from langgraph.checkpoint.memory import MemorySaver
 
-from app.research.state import ResearchState 
+from app.research.state import ResearchState
 from app.research.nodes import (
     plan_research,
     generate_sub_query,
@@ -13,9 +13,24 @@ from app.research.nodes import (
     final_synthesis
 )
 
-from config.logging_config import get_logger 
+from config import settings
+from config.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _build_checkpointer():
+    if settings.redis_url:
+        try:
+            from langgraph.checkpoint.redis import RedisSaver
+            checkpointer = RedisSaver.from_conn_string(settings.redis_url)
+            checkpointer.setup()
+            logger.info("LangGraph checkpointer: Redis", extra={"redis_url": settings.redis_url.split("@")[-1]})
+            return checkpointer
+        except Exception as e:
+            logger.warning("Redis checkpointer failed, falling back to MemorySaver", extra={"error": str(e)})
+    logger.warning("LangGraph checkpointer: MemorySaver (state will be lost on restart — set REDIS_URL to persist)")
+    return MemorySaver()
 
 class ResearchDecision(Enum):
     CONTINUE_RESEARCH = "continue_research"
@@ -68,8 +83,7 @@ def create_research_graph() -> StateGraph:
 
     workflow.add_edge("final_synthesis", "__end__")
 
-    memory = MemorySaver() #In memory, use FileSaver or database-backed checkpointing for production
-    app = workflow.compile(checkpointer=memory) #compile graph with checkpointing for state persistence 
+    app = workflow.compile(checkpointer=_build_checkpointer())
 
     logger.info("Research Graph created and compiled")
     return app 

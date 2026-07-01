@@ -1,25 +1,33 @@
-"""
-To wrap the RAG as a tool that can be called by the research agent
-"""
-
-from typing import Dict, Any 
+from typing import Dict, Any, Optional
+from contextvars import ContextVar
 from contextlib import contextmanager
 from langchain_core.tools import tool, ToolException
 
 from app.services.rag_service import RAGService
 from app.database import db
 from config import settings
-from config.logging_config import get_logger 
+from config.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_rag_service = None 
+_current_model: ContextVar[Optional[str]] = ContextVar("current_model", default=None)
+_current_session_id: ContextVar[Optional[str]] = ContextVar("current_session_id", default=None)
+
+
+def set_request_context(model: Optional[str], session_id: Optional[str] = None) -> None:
+    _current_model.set(model)
+    _current_session_id.set(session_id)
+
+
+_rag_service: Optional[RAGService] = None
+
 
 def get_rag_service() -> RAGService:
     global _rag_service
     if _rag_service is None:
         _rag_service = RAGService()
-    return _rag_service 
+    return _rag_service
+
 
 @contextmanager
 def get_db_session():
@@ -30,82 +38,105 @@ def get_db_session():
     finally:
         session.close()
 
-@tool #makes the function callable by the agents
+
+@tool
 def research_rag_tool(query: str) -> Dict[str, Any]:
     """Execute a RAG query to retrieve relevant information from the knowledge base.
-    
+
     Args:
         query: The search query to execute against the knowledge base.
-        
+
     Returns:
-        A dictionary containing:
-        - answer: The generated answer based on retrieved context
-        - sources: List of source documents with id, title, and source path
-        - retrieved_chunks: List of retrieved chunk IDs
-        - chunk_ids: List of chunk IDs used in the answer
-        - query: The original query
+        A dictionary containing the answer, sources, retrieved chunk IDs, and the original query.
     """
-    logger.info(
-        "RAG tool called",
-        extra={
-            "tool_query": query,
-            "tool_name": "research_rag_tool"
-        }
-    )
+    model = _current_model.get()
+    session_id = _current_session_id.get()
+
+    logger.info("RAG tool called", extra={"tool_query": query, "session_id": session_id})
     try:
         rag_service = get_rag_service()
         with get_db_session() as session:
-            # Use optimized top_k for deep research mode
-            top_k = settings.deep_research_top_k
             result = rag_service.query(
                 db=session,
-                query=query, 
-                top_k=top_k,
+                query=query,
+                top_k=settings.deep_research_top_k,
+                model=model,
+                session_id=session_id,
             )
-
-        has_sources = len(result.get("sources", [])) > 0 
-        has_chunks = len(result.get("retrieved_chunks", [])) > 0 
-        is_success = has_sources and has_chunks
-
-        if is_success:
-            logger.info(
-                "RAG tool completed successfully",
-                extra={
-                    "tool_query": query,
-                    "answer_length": len(result.get("answer", "")),
-                    "sources_count": len(result.get("sources", [])),
-                    "chunks_count": len(result.get("retrieved_chunks", []))
-                }
-            )
-        else:
-            logger.warning(
-                "RAG tool completed with no results",
-                extra={
-                    "tool_query": query,
-                    "answer": result.get("answer", "")[:200],  # Log first 200 chars of answer
-                    "sources_count": len(result.get("sources", [])),
-                    "chunks_count": len(result.get("retrieved_chunks", []))
-                }
-            )
+        logger.info(
+            "RAG tool completed",
+            extra={"tool_query": query, "sources_count": len(result.get("sources", []))},
+        )
         return {
             "answer": result.get("answer"),
             "sources": result.get("sources", []),
             "retrieved_chunks": result.get("retrieved_chunks", []),
-            "chunk_ids": result.get("chunk_ids", []),
-            "query": query 
+            "chunk_ids": result.get("retrieved_chunks", []),
+            "query": query,
         }
-    
     except Exception as e:
-        logger.error(
-            "RAG tool error",
-            extra={
-                "tool_query": query,
-                "error": str(e),
-                "error_type": type(e).__name__
-            },
-            exc_info=True
-        )
-        # Raise ToolException so LangGraph can handle it
+        logger.error("RAG tool error", extra={"error": str(e)}, exc_info=True)
         raise ToolException(f"Error in RAG tool: {str(e)}")
 
-research_tools = [research_rag_tool]
+
+# ---------------------------------------------------------------------------
+# Web search tool (Tavily)
+# ---------------------------------------------------------------------------
+
+_tavily_client = None
+
+
+def _get_tavily_client():
+    global _tavily_client
+    if _tavily_client is not None:
+        return _tavily_client
+    if not settings.tavily_api_key:
+        return None
+    try:
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        _tavily_client = TavilySearchResults(max_results=5, tavily_api_key=settings.tavily_api_key)
+        logger.info("Tavily web search client initialised")
+    except Exception as e:
+        logger.warning("Could not initialise Tavily", extra={"error": str(e)})
+        _tavily_client = None
+    return _tavily_client
+
+
+@tool
+def web_search_tool(query: str) -> Dict[str, Any]:
+    """Search the web for current information not available in the knowledge base.
+
+    Args:
+        query: The search query to send to the web.
+
+    Returns:
+        A dictionary with web search results, a combined answer snippet, and the query.
+    """
+    logger.info("Web search tool called", extra={"query": query})
+    client = _get_tavily_client()
+
+    if client is None:
+        logger.warning("Web search unavailable — no TAVILY_API_KEY configured")
+        return {"answer": "Web search is not available (TAVILY_API_KEY not configured).", "results": [], "sources": [], "query": query}
+
+    try:
+        raw_results = client.invoke(query)
+        sources, snippets = [], []
+        for r in raw_results:
+            if isinstance(r, dict):
+                url = r.get("url", "")
+                content = r.get("content", "")
+                title = r.get("title") or url
+                sources.append({"id": None, "title": title, "source": url, "type": "web"})
+                if content:
+                    snippets.append(f"[{title}]\n{content}")
+
+        combined_answer = "\n\n".join(snippets) if snippets else "No web results found."
+        logger.info("Web search complete", extra={"result_count": len(sources)})
+        return {"answer": combined_answer, "results": raw_results, "sources": sources, "query": query}
+    except Exception as e:
+        logger.error("Web search error", extra={"error": str(e)}, exc_info=True)
+        raise ToolException(f"Error in web search tool: {str(e)}")
+
+
+research_tools = [research_rag_tool, web_search_tool]

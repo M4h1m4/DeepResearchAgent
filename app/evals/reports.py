@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class EvaluationReport:
-    """Evaluation report."""f
+    """Evaluation report."""
     
     mode: str  # "fast_rag" or "deep_research"
     dataset_name: str

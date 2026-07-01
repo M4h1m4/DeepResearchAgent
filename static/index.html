@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deep Research Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: {
+              950: '#0a0a0c', 900: '#101013', 850: '#16161a',
+              800: '#1c1c21', 700: '#26262d', 600: '#34343d', 500: '#52525b',
+            },
+            brand: { 600: '#6366f1', 500: '#818cf8', 400: '#a5b4fc' },
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+
+    .prose p { margin-bottom: 0.75rem; line-height: 1.65; }
+    .prose ul { list-style-type: disc; padding-left: 1.5rem; margin-bottom: 0.75rem; }
+    .prose ol { list-style-type: decimal; padding-left: 1.5rem; margin-bottom: 0.75rem; }
+    .prose li { margin-bottom: 0.3rem; line-height: 1.6; }
+    .prose strong { font-weight: 650; color: #f4f4f5; }
+    .prose em { font-style: italic; }
+    .prose code { background: rgba(255,255,255,0.08); padding: 0.15em 0.4em; border-radius: 5px; font-size: 0.85em; font-family: ui-monospace, monospace; }
+    .prose pre { background: rgba(0,0,0,0.35); padding: 1rem; border-radius: 10px; overflow-x: auto; margin-bottom: 0.75rem; }
+    .prose pre code { background: none; padding: 0; }
+    .prose h1, .prose h2, .prose h3 { font-weight: 650; margin: 1.1rem 0 0.55rem; color: #f4f4f5; }
+    .prose h1 { font-size: 1.35em; }
+    .prose h2 { font-size: 1.18em; }
+    .prose h3 { font-size: 1.04em; }
+    .prose blockquote { border-left: 3px solid #6366f1; padding-left: 1rem; opacity: 0.85; margin-bottom: 0.75rem; }
+    .prose a { color: #a5b4fc; text-decoration: underline; text-underline-offset: 2px; }
+
+    .msg-enter { animation: msgIn 0.28s cubic-bezier(0.21, 1, 0.4, 1); }
+    @keyframes msgIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    .dot-bounce span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: bounce 1.2s infinite; }
+    .dot-bounce span:nth-child(2) { animation-delay: 0.18s; }
+    .dot-bounce span:nth-child(3) { animation-delay: 0.36s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-5px); opacity: 1; } }
+
+    .spin { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2a31; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a44; }
+
+    .composer-focus { box-shadow: 0 0 0 1px rgba(99,102,241,0.5), 0 8px 30px rgba(0,0,0,0.35); border-color: rgba(99,102,241,0.5) !important; }
+  </style>
+</head>
+<body class="h-full bg-ink-950 text-gray-100 flex flex-col" style="height:100vh;">
+
+  <!-- ── Header ── -->
+  <header class="flex-none border-b border-ink-800/70 backdrop-blur bg-ink-950/80 sticky top-0 z-10">
+    <div class="flex items-center gap-3 px-6 h-[68px]">
+
+      <!-- Brand (far left) -->
+      <div class="flex items-center gap-3 mr-auto">
+        <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-brand-600 to-violet-500 flex items-center justify-center text-xl shadow-lg shadow-brand-600/20">🔬</div>
+        <div class="leading-tight">
+          <div class="font-semibold text-xl tracking-tight">Deep Research</div>
+          <div class="text-[13px] text-ink-500">RAG · LangGraph</div>
+        </div>
+      </div>
+
+      <!-- Model (right) -->
+      <div class="relative">
+        <select id="modelSelect"
+          class="appearance-none bg-ink-850 border border-ink-700 rounded-xl pl-4 pr-9 py-2.5 text-sm font-medium text-gray-200 outline-none hover:border-ink-600 focus:border-brand-600 transition-colors cursor-pointer">
+          <option value="gpt-4o-mini">gpt-4o-mini</option>
+          <option value="gpt-4o">gpt-4o</option>
+          <option value="gpt-4-turbo">gpt-4-turbo</option>
+          <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <svg class="w-4 h-4 text-ink-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      </div>
+      <input id="customModel" type="text" placeholder="model name"
+        class="hidden bg-ink-850 border border-ink-700 rounded-xl px-3 py-2.5 text-sm w-36 outline-none focus:border-brand-600" />
+
+      <!-- Mode segmented control (far right) -->
+      <div class="flex p-1 rounded-xl bg-ink-850 border border-ink-700 text-sm">
+        <button id="modeBtn-fast" onclick="setMode('fast')"
+          class="px-4 py-1.5 rounded-lg font-medium transition-colors">⚡ Fast</button>
+        <button id="modeBtn-deep" onclick="setMode('deep')"
+          class="px-4 py-1.5 rounded-lg font-medium transition-colors">🔬 Deep</button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- ── Chat ── -->
+  <main id="chat" class="flex-1 overflow-y-auto scroll-smooth">
+    <div class="max-w-3xl mx-auto px-4 py-8 space-y-5" id="messages">
+
+      <!-- Welcome -->
+      <div id="welcome" class="flex flex-col items-center justify-center text-center pt-12 pb-6">
+        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-600 to-violet-500 flex items-center justify-center text-2xl shadow-xl shadow-brand-600/25 mb-5">🔬</div>
+        <h1 class="text-xl font-semibold tracking-tight text-gray-100">Deep Research Agent</h1>
+        <p class="text-sm text-ink-500 mt-2 max-w-sm leading-relaxed">
+          Ask anything. Switch to <span class="text-violet-400 font-medium">Deep</span> for multi-step research,
+          or attach documents with <span class="text-brand-400 font-medium">+</span> to query your own files.
+        </p>
+
+        <div class="mt-7 w-full max-w-md space-y-2">
+          <div class="text-[11px] uppercase tracking-wide text-ink-500 font-medium text-left mb-1">Try asking</div>
+          <button onclick="setSuggestion(this)" class="group w-full bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-ink-700 rounded-xl px-4 py-3 text-sm text-gray-300 text-left transition-all flex items-center gap-3">
+            <span class="text-base">📚</span><span class="flex-1">What topics are covered in the knowledge base?</span>
+            <span class="text-ink-600 group-hover:text-ink-500 transition-colors">→</span>
+          </button>
+          <button onclick="setSuggestion(this)" class="group w-full bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-ink-700 rounded-xl px-4 py-3 text-sm text-gray-300 text-left transition-all flex items-center gap-3">
+            <span class="text-base">📝</span><span class="flex-1">Summarize the key concepts from my documents</span>
+            <span class="text-ink-600 group-hover:text-ink-500 transition-colors">→</span>
+          </button>
+          <button onclick="setSuggestion(this)" class="group w-full bg-ink-900 hover:bg-ink-850 border border-ink-800 hover:border-ink-700 rounded-xl px-4 py-3 text-sm text-gray-300 text-left transition-all flex items-center gap-3">
+            <span class="text-base">🔍</span><span class="flex-1">What are the latest advancements in this field?</span>
+            <span class="text-ink-600 group-hover:text-ink-500 transition-colors">→</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ── Composer ── -->
+  <footer class="flex-none px-4 pb-4 pt-2 bg-gradient-to-t from-ink-950 via-ink-950 to-transparent">
+    <div class="max-w-3xl mx-auto">
+
+      <!-- Hidden file input -->
+      <input id="fileInput" type="file" accept=".pdf,.txt,.docx" class="hidden" onchange="onFileSelected()" />
+
+      <!-- Unified composer container -->
+      <div id="composer" class="bg-ink-900 border border-ink-700 rounded-3xl transition-all overflow-hidden">
+
+        <!-- Attached file chips -->
+        <div id="fileChips" class="hidden flex flex-wrap items-center gap-2 px-3.5 pt-3"></div>
+
+        <!-- Textarea -->
+        <textarea id="input" rows="1"
+          placeholder="Ask anything…"
+          class="w-full bg-transparent px-4 pt-3.5 pb-1 text-[15px] outline-none resize-none placeholder-ink-500"
+          style="max-height:200px;"
+          onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+
+        <!-- Toolbar -->
+        <div class="flex items-center justify-between px-2.5 pb-2.5 pt-1">
+          <button id="attachBtn" onclick="triggerUpload()" title="Attach document"
+            class="flex items-center gap-1.5 h-9 px-3 rounded-full text-ink-500 hover:text-gray-200 hover:bg-ink-800 transition-colors text-sm">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            <span id="attachLabel" class="text-[13px] font-medium hidden sm:inline">Attach</span>
+          </button>
+
+          <button id="sendBtn" onclick="sendMessage()" title="Send"
+            class="flex-none w-9 h-9 rounded-full bg-gray-100 text-ink-950 hover:bg-white disabled:bg-ink-700 disabled:text-ink-500 disabled:cursor-not-allowed flex items-center justify-center transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="text-center text-[11px] text-ink-600 mt-2.5">
+        Deep Research can make mistakes. Verify important information.
+      </div>
+    </div>
+  </footer>
+
+<script>
+  const MAX_FILES = 5;
+  let currentMode = 'fast';
+  let sessionId = null;
+  let uploadedFiles = [];   // [{ name, ext, status: 'uploading'|'ready'|'error' }]
+  marked.setOptions({ breaks: true });
+
+  const $ = id => document.getElementById(id);
+
+  window.addEventListener('load', () => {
+    const savedModel = localStorage.getItem('openai_model') || 'gpt-4o-mini';
+    $('modelSelect').value = savedModel;
+    $('customModel').classList.toggle('hidden', savedModel !== 'custom');
+    $('modelSelect').addEventListener('change', () => {
+      localStorage.setItem('openai_model', $('modelSelect').value);
+      $('customModel').classList.toggle('hidden', $('modelSelect').value !== 'custom');
+    });
+
+    // composer focus ring
+    const input = $('input');
+    input.addEventListener('focus', () => $('composer').classList.add('composer-focus'));
+    input.addEventListener('blur', () => $('composer').classList.remove('composer-focus'));
+
+    setMode('fast');
+  });
+
+  function setMode(m) {
+    currentMode = m;
+    ['fast', 'deep'].forEach(id => {
+      const btn = $('modeBtn-' + id);
+      const active = id === m;
+      btn.className = 'px-4 py-1.5 rounded-lg font-medium transition-colors '
+        + (active ? 'bg-brand-600 text-white shadow-sm' : 'text-ink-500 hover:text-gray-300');
+    });
+  }
+
+  function getModel() {
+    return $('modelSelect').value === 'custom'
+      ? ($('customModel').value || 'gpt-4o-mini')
+      : $('modelSelect').value;
+  }
+
+  function setSuggestion(btn) {
+    $('input').value = btn.querySelector('span:nth-child(2)').textContent.trim();
+    autoResize($('input'));
+    $('input').focus();
+  }
+
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  // ── Upload ──
+  function triggerUpload() {
+    if (uploadedFiles.length >= MAX_FILES) {
+      flashAttachLimit();
+      return;
+    }
+    $('fileInput').click();
+  }
+
+  function flashAttachLimit() {
+    const label = $('attachLabel');
+    const prev = label.textContent;
+    label.classList.remove('hidden');
+    label.textContent = `Max ${MAX_FILES} files`;
+    $('attachBtn').classList.add('text-amber-400');
+    setTimeout(() => {
+      label.textContent = prev;
+      $('attachBtn').classList.remove('text-amber-400');
+      if (window.innerWidth < 640) label.classList.add('hidden');
+    }, 1800);
+  }
+
+  function onFileSelected() {
+    const file = $('fileInput').files[0];
+    if (!file) return;
+    if (uploadedFiles.length >= MAX_FILES) { flashAttachLimit(); $('fileInput').value = ''; return; }
+
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const entry = { name: file.name, ext, status: 'uploading' };
+    uploadedFiles.push(entry);
+    renderChips();
+    uploadDoc(file, entry);
+  }
+
+  async function uploadDoc(file, entry) {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (sessionId) formData.append('session_id', sessionId);
+
+    try {
+      const res = await fetch('/api/v1/upload', { method: 'POST', body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Upload failed');
+      }
+      const data = await res.json();
+      sessionId = data.session_id;
+      entry.status = 'ready';
+    } catch (err) {
+      entry.status = 'error';
+      entry.error = err.message;
+    } finally {
+      $('fileInput').value = '';
+      renderChips();
+    }
+  }
+
+  // Removes ALL attached docs and clears the session.
+  // (Serverless Pinecone can't cheaply delete a single doc from a shared
+  //  namespace, so removal is all-or-nothing to stay truthful about what's searched.)
+  async function clearAllFiles() {
+    const sid = sessionId;
+    uploadedFiles = [];
+    sessionId = null;
+    renderChips();
+    if (sid) {
+      try { await fetch(`/api/v1/sessions/${sid}`, { method: 'DELETE' }); } catch (_) {}
+    }
+  }
+
+  function fileIcon(ext) {
+    const map = { pdf: ['PDF', 'bg-red-500/15 text-red-400'],
+                  docx: ['DOC', 'bg-blue-500/15 text-blue-400'],
+                  doc: ['DOC', 'bg-blue-500/15 text-blue-400'],
+                  txt: ['TXT', 'bg-gray-500/20 text-gray-300'] };
+    const [label, cls] = map[ext] || ['FILE', 'bg-ink-700 text-ink-400'];
+    return `<span class="flex-none text-[9px] font-bold px-1.5 py-0.5 rounded ${cls}">${label}</span>`;
+  }
+
+  function renderChips() {
+    const wrap = $('fileChips');
+    if (uploadedFiles.length === 0) {
+      wrap.classList.add('hidden');
+      wrap.innerHTML = '';
+      return;
+    }
+    wrap.classList.remove('hidden');
+
+    const chips = uploadedFiles.map(f => {
+      let status = '';
+      if (f.status === 'uploading')
+        status = `<svg class="w-3.5 h-3.5 text-ink-500 spin flex-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-width="2" d="M12 3a9 9 0 1 0 9 9"/></svg>`;
+      else if (f.status === 'ready')
+        status = `<svg class="w-3.5 h-3.5 text-emerald-400 flex-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>`;
+      else
+        status = `<span title="${escapeHtml(f.error || 'Failed')}" class="text-amber-400 flex-none text-xs">⚠</span>`;
+
+      return `<div class="flex items-center gap-2 max-w-[200px] bg-ink-800 border border-ink-700 rounded-xl pl-2 pr-2.5 py-1.5">
+                ${fileIcon(f.ext)}
+                <span class="text-[12.5px] text-gray-300 truncate">${escapeHtml(f.name)}</span>
+                ${status}
+              </div>`;
+    }).join('');
+
+    const counter = `<span class="text-[11px] text-ink-500 ml-0.5">${uploadedFiles.length}/${MAX_FILES}</span>`;
+    const clearBtn = `<button onclick="clearAllFiles()" title="Remove all"
+        class="flex items-center gap-1 text-[11px] text-ink-500 hover:text-red-400 transition-colors ml-auto px-1.5 py-1">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        Clear
+      </button>`;
+
+    wrap.innerHTML = chips + counter + clearBtn;
+  }
+
+  // ── Send message ──
+  async function sendMessage() {
+    const input = $('input');
+    const query = input.value.trim();
+    if (!query) return;
+
+    $('sendBtn').disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+
+    addMessage('user', query);
+    addLoading(currentMode);
+
+    try {
+      const body = { query, model: getModel() };
+      if (sessionId) body.session_id = sessionId;
+
+      const res = await fetch(`/api/v1/query?mode=${currentMode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      removeLoading();
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Request failed');
+      }
+
+      const data = await res.json();
+      const rm = data.research_metadata || {};
+      addMessage('ai', data.answer, {
+        mode: rm.mode || currentMode,
+        ms: data.response_time_ms,
+        sources: data.sources || [],
+        guardrails: rm.guardrails || null,
+        trace: rm,
+      });
+
+    } catch (err) {
+      removeLoading();
+      addMessage('ai', `**Error:** ${err.message}`, { mode: currentMode });
+    } finally {
+      $('sendBtn').disabled = false;
+      input.focus();
+    }
+  }
+
+  // ── Messages ──
+  function dismissWelcome() {
+    const w = $('welcome');
+    if (w) w.remove();
+  }
+
+  // Convert inline [N] citation markers in the rendered answer into links to the
+  // Nth source (opens the URL for web sources, shows the title on hover otherwise),
+  // so citations line up with the Sources list instead of opaque "Finding N" text.
+  function linkifyCitations(html, sources) {
+    if (!sources || !sources.length) return html;
+    return html.replace(/\[(\d+(?:\s*,\s*\d+)*)\]/g, (match, group) => {
+      const nums = group.split(',').map(n => parseInt(n.trim(), 10));
+      if (nums.some(n => !(n >= 1 && n <= sources.length))) return match;
+      return nums.map(n => {
+        const s = sources[n - 1];
+        const title = escapeHtml(s.title || ('Source ' + n));
+        if (s.source && /^https?:\/\//.test(s.source)) {
+          return `<sup><a href="${escapeHtml(s.source)}" target="_blank" rel="noopener" title="${title}" class="text-brand-400 hover:underline px-0.5">[${n}]</a></sup>`;
+        }
+        return `<sup title="${title}" class="text-ink-400 px-0.5">[${n}]</sup>`;
+      }).join('');
+    });
+  }
+
+  function addMessage(role, content, meta = null) {
+    dismissWelcome();
+    const container = $('messages');
+
+    if (role === 'user') {
+      const el = document.createElement('div');
+      el.className = 'msg-enter flex justify-end';
+      el.innerHTML = `
+        <div class="max-w-[80%] bg-brand-600 text-white rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap">${escapeHtml(content)}</div>`;
+      container.appendChild(el);
+    } else {
+      const isDeep = meta?.mode === 'deep';
+      const modeBadge = isDeep
+        ? '<span class="inline-flex items-center gap-1 text-[11px] font-medium text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">🔬 Deep Research</span>'
+        : '<span class="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">⚡ Fast RAG</span>';
+
+      const timeBadge = meta?.ms
+        ? `<span class="text-[11px] text-ink-600">${(meta.ms / 1000).toFixed(1)}s</span>`
+        : '';
+
+      const confidenceBadge = confidenceChip(meta?.guardrails);
+      const traceHtml = renderTrace(meta?.trace, meta?.guardrails);
+
+      const sourcesHtml = (meta?.sources?.length)
+        ? `<div class="mt-3.5 border-t border-ink-700/60 pt-3">
+            <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.chev').classList.toggle('rotate-180')"
+              class="text-[12px] text-ink-500 hover:text-gray-300 flex items-center gap-1.5 transition-colors">
+              <span>Sources</span>
+              <span class="bg-ink-700 text-ink-400 rounded-full px-1.5 text-[10px]">${meta.sources.length}</span>
+              <span class="chev transition-transform text-ink-600">▾</span>
+            </button>
+            <div class="hidden mt-2 space-y-1.5">
+              ${meta.sources.map(s => `
+                <div class="text-[12px] flex items-center gap-2 bg-ink-950/60 border border-ink-800 rounded-lg px-2.5 py-1.5">
+                  <span class="text-ink-500">📄</span>
+                  <span class="text-gray-300 truncate">${escapeHtml(s.title || 'Untitled')}</span>
+                  ${s.source && /^https?:\/\//.test(s.source)
+                    ? `<a href="${escapeHtml(s.source)}" target="_blank" rel="noopener" class="text-brand-400 hover:underline truncate ml-auto">link ↗</a>`
+                    : ''}
+                </div>`).join('')}
+            </div>
+          </div>`
+        : '';
+
+      const el = document.createElement('div');
+      el.className = 'msg-enter flex justify-start';
+      el.innerHTML = `
+        <div class="max-w-full w-full">
+          <div class="flex items-center flex-wrap gap-2 mb-1.5">${modeBadge}${confidenceBadge}${timeBadge}</div>
+          <div class="prose text-[15px] text-gray-200">${linkifyCitations(marked.parse(content), meta?.sources)}</div>
+          ${sourcesHtml}
+          ${traceHtml}
+        </div>`;
+      container.appendChild(el);
+    }
+
+    scrollToBottom();
+    return container.lastElementChild;
+  }
+
+  // Confidence pill derived from the hallucination-guard faithfulness score.
+  function confidenceChip(g) {
+    if (!g || typeof g.faithfulness_score !== 'number') return '';
+    const score = g.faithfulness_score;
+    const pct = Math.round(score * 100);
+    let label, cls;
+    if (g.is_grounded && score >= 0.7) { label = 'High confidence'; cls = 'text-emerald-400 bg-emerald-500/10'; }
+    else if (score >= 0.4)             { label = 'Moderate confidence'; cls = 'text-amber-400 bg-amber-500/10'; }
+    else                                { label = 'Low confidence'; cls = 'text-red-400 bg-red-500/10'; }
+    return `<span class="inline-flex items-center gap-1 text-[11px] font-medium ${cls} px-2 py-0.5 rounded-full" title="Faithfulness: how well the answer is supported by retrieved sources">
+              <span class="w-1.5 h-1.5 rounded-full bg-current"></span>${label} · ${pct}%
+            </span>`;
+  }
+
+  // Expandable "Research trace" — the UI equivalent of peeking at the logs:
+  // mode, sub-queries, plan, and guardrail results for this answer.
+  function renderTrace(trace, g) {
+    trace = trace || {};
+    const rows = [];
+
+    if (trace.mode) rows.push(traceRow('Mode', trace.mode === 'deep' ? 'Deep Research' : 'Fast RAG'));
+    if (typeof trace.iterations === 'number') rows.push(traceRow('Iterations', String(trace.iterations)));
+
+    if (Array.isArray(trace.sub_queries) && trace.sub_queries.length) {
+      rows.push(`<div class="mt-1">
+        <div class="text-ink-500 mb-1">Sub-queries (${trace.sub_queries.length})</div>
+        <ol class="list-decimal pl-5 space-y-0.5 text-gray-400">
+          ${trace.sub_queries.map(q => `<li>${escapeHtml(q)}</li>`).join('')}
+        </ol></div>`);
+    }
+    if (trace.research_plan) {
+      rows.push(`<div class="mt-1"><div class="text-ink-500 mb-0.5">Research plan</div>
+        <div class="text-gray-400">${escapeHtml(trace.research_plan)}</div></div>`);
+    }
+
+    if (g) {
+      if (typeof g.faithfulness_score === 'number')
+        rows.push(traceRow('Faithfulness', `${(g.faithfulness_score * 100).toFixed(0)}% · ${g.is_grounded ? 'grounded' : 'not grounded'}`));
+      rows.push(traceRow('PII detected', g.pii_detected
+        ? `Yes${g.pii_entity_types?.length ? ' (' + g.pii_entity_types.join(', ') + ')' : ''}` : 'No'));
+      if (Array.isArray(g.unsupported_claims) && g.unsupported_claims.length) {
+        rows.push(`<div class="mt-1"><div class="text-ink-500 mb-1">Unsupported claims (${g.unsupported_claims.length})</div>
+          <ul class="list-disc pl-5 space-y-0.5 text-amber-400/90">
+            ${g.unsupported_claims.map(c => `<li>${escapeHtml(c)}</li>`).join('')}
+          </ul></div>`);
+      }
+    }
+
+    if (!rows.length) return '';
+
+    return `<div class="mt-2.5">
+      <button onclick="this.nextElementSibling.classList.toggle('hidden'); this.querySelector('.chev').classList.toggle('rotate-180')"
+        class="text-[12px] text-ink-500 hover:text-gray-300 flex items-center gap-1.5 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        <span>Research trace</span>
+        <span class="chev transition-transform text-ink-600">▾</span>
+      </button>
+      <div class="hidden mt-2 bg-ink-950/60 border border-ink-800 rounded-xl p-3 text-[12px] space-y-1.5">
+        ${rows.join('')}
+      </div>
+    </div>`;
+  }
+
+  function traceRow(k, v) {
+    return `<div class="flex gap-2"><span class="text-ink-500 min-w-[90px]">${escapeHtml(k)}</span><span class="text-gray-300">${escapeHtml(v)}</span></div>`;
+  }
+
+  function addLoading(mode) {
+    dismissWelcome();
+    const container = $('messages');
+    const el = document.createElement('div');
+    el.id = 'loading-msg';
+    el.className = 'msg-enter flex justify-start';
+    const label = mode === 'deep' ? 'Researching — this may take 15–30s' : 'Retrieving';
+    el.innerHTML = `
+      <div class="flex items-center gap-2.5 text-ink-500 text-sm py-1">
+        <span class="dot-bounce flex items-center gap-1"><span></span><span></span><span></span></span>
+        <span>${label}</span>
+      </div>`;
+    container.appendChild(el);
+    scrollToBottom();
+  }
+
+  function removeLoading() { $('loading-msg')?.remove(); }
+
+  function scrollToBottom() {
+    const chat = $('chat');
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# Local run (Replit "Run" button)
+run = "mkdir -p data/documents && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+# Replit language module — satisfies requires-python >=3.10
+modules = ["python-3.11"]
+
+# Production deployment (Reserved VM — persistent disk for SQLite + uploads)
+[deployment]
+deploymentTarget = "gce"
+run = ["sh", "-c", "mkdir -p data/documents && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+# Map internal app port to public HTTP
+[[ports]]
+localPort = 8000
+externalPort = 80

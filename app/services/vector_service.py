@@ -1,239 +1,162 @@
-from typing import List, Dict, Tuple, Optional 
-import uuid 
+import time
+import uuid
+from typing import List, Dict, Optional
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings 
-from langchain_openai import OpenAIEmbeddings 
-try:
-    from langchain_chroma import Chroma
-except ImportError:
-    try:
-        from langchain_community.vectorstores import Chroma
-    except ImportError:
-from langchain.vectorstores import Chroma 
+from pinecone import Pinecone, ServerlessSpec
+from langchain_openai import OpenAIEmbeddings
 
-from config import settings 
-from config.logging_config import get_logger 
+from config import settings
+from config.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_EMBEDDING_DIM = 1536
+
 
 class VectorStore:
 
     def __init__(self):
-        logger.info(
-            "Initializing Vector Store", 
-            extra={
-                "persist_directory": settings.chroma_persist_directory, 
-                "embedding_model": settings.embedding_model
-            }
-        )
-        self.persist_directory = settings.chroma_persist_directory
-        self.embeddings = OpenAIEmbeddings(
-            model = settings.embedding_model, 
-            openai_api_key=settings.openai_api_key
-        )
+        if not settings.pinecone_api_key:
+            raise ValueError("PINECONE_API_KEY is required. Add it to your .env file.")
 
-        self.client = chromadb.PersistentClient(
-            path=self.persist_directory, 
-            settings = ChromaSettings(anonymized_telemetry=False)
-        )
-        logger.debug("Chroma client initialized", extra={"persist_directory": self.persist_directory})
+        logger.info("Initializing Pinecone vector store", extra={"index": settings.pinecone_index_name})
+        self.pc = Pinecone(api_key=settings.pinecone_api_key)
+        self.index_name = settings.pinecone_index_name
+        self._ensure_index()
+        self.index = self.pc.Index(self.index_name)
 
-        self.collection_name = "documents"
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name, 
-            metadata={"hnsw:space": "cosine"}
-        )
-        logger.info(
-            "Chroma collection ready",
-            extra={"collection_name": self.collection_name, "collection_count": self.collection.count()}
-        )
+        stats = self.index.describe_index_stats()
+        logger.info("Pinecone index ready", extra={"index": self.index_name, "count": stats.total_vector_count})
 
-        # Initialize Chroma vectorstore - use collection parameter for langchain-chroma
-        try:
-            # Try new langchain-chroma API
-            self.vectorstore = Chroma(
-                client=self.client,
-                collection_name=self.collection_name,
-                embedding_function=self.embeddings,
+    def _ensure_index(self) -> None:
+        existing = [i.name for i in self.pc.list_indexes()]
+        if self.index_name not in existing:
+            logger.info("Creating Pinecone index", extra={"index": self.index_name})
+            self.pc.create_index(
+                name=self.index_name,
+                dimension=_EMBEDDING_DIM,
+                metric="cosine",
+                spec=ServerlessSpec(cloud=settings.pinecone_cloud, region=settings.pinecone_region),
             )
-        except Exception as e:
-            logger.warning(f"Failed to initialize with collection_name, trying alternative: {e}")
-            # Fallback: use collection directly
-            self.vectorstore = Chroma(
-                client=self.client,
-                collection=self.collection,
-                embedding_function=self.embeddings,
-            )
-        
-        logger.info(
-            "Vector store initialization completed",
-            extra={"collection_name": self.collection_name}
-        )
+            for _ in range(30):
+                if self.pc.describe_index(self.index_name).status.ready:
+                    break
+                time.sleep(2)
 
+    def _embedder(self) -> OpenAIEmbeddings:
+        if not settings.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required. Add it to your .env file.")
+        return OpenAIEmbeddings(model=settings.embedding_model, openai_api_key=settings.openai_api_key)
 
-    def add_documents(self, chunks: List[Dict]) -> List[str]:
-        logger.info(
-            "Adding document into vector store", 
-            extra={
-                "chunk_count": len(chunks)
-            }
-        )
+    def add_documents(
+        self,
+        chunks: List[Dict],
+        embeddings: Optional[List[List[float]]] = None,
+        namespace: str = "",
+    ) -> List[str]:
+        logger.info("Adding documents to Pinecone", extra={"chunk_count": len(chunks), "namespace": namespace or "default"})
 
-        texts = [chunk["text"] for chunk in chunks]
-        metadatas = []
+        if embeddings is None:
+            texts = [chunk["text"] for chunk in chunks]
+            embeddings = self._embedder().embed_documents(texts)
+
+        vectors = []
         ids = []
-
-        for chunk in chunks:
-            metadata={
-                "document_id": chunk["document_id"], 
-                "chunk_index": chunk["chunk_index"],
-                "chunk_id":  chunk.get("id"), 
-                **chunk.get("metadata", {})
-            }
-            metadatas.append(metadata)
-
+        for chunk, embedding in zip(chunks, embeddings):
             chunk_id = chunk.get("vector_id") or str(uuid.uuid4())
             ids.append(chunk_id)
-        
-        logger.debug(
-            "Prepared chunks for vector store",
-            extra={
-                "total_chunks": len(chunks),
-                "document_ids": list(set(chunk["document_id"] for chunk in chunks))
+            metadata: Dict = {
+                "text": chunk["text"],
+                "document_id": str(chunk["document_id"]),
+                "chunk_index": int(chunk["chunk_index"]),
+                "chunk_id": str(chunk.get("id") or ""),
             }
-        )
+            for k, v in chunk.get("metadata", {}).items():
+                if isinstance(v, (str, int, float, bool)):
+                    metadata[k] = v
+                elif isinstance(v, list) and all(isinstance(i, str) for i in v):
+                    metadata[k] = v
+            vectors.append((chunk_id, embedding, metadata))
 
-        try:
-            self.vectorstore.add_texts( #Embeddings are created here
-            texts=texts, 
-            metadatas=metadatas, 
-            ids=ids
-        )
-        logger.info(
-            "Documents added to vector store",
-            extra={"chunk_count": len(ids), "vector_ids": ids[:5]}  # Log first 5 IDs
-            )
-        except Exception as e:
-            logger.error(
-                "Error adding documents to vector store",
-                extra={"error": str(e), "chunk_count": len(ids)},
-                exc_info=True
-            )
-            raise
+        batch_size = 100
+        for i in range(0, len(vectors), batch_size):
+            self.index.upsert(vectors=vectors[i : i + batch_size], namespace=namespace)
 
-        # Verify documents were added
-        collection_count = self.collection.count()
-        logger.debug(
-            "Vector store collection count after add",
-            extra={"collection_count": collection_count, "added_count": len(ids)}
-        )
+        logger.info("Documents added to Pinecone", extra={"chunk_count": len(ids)})
+        return ids
 
-        return ids 
-    
+    def _query_namespace(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+        filter_dict: Optional[Dict],
+        namespace: str,
+    ) -> List[Dict]:
+        query_kwargs: Dict = {
+            "vector": query_embedding,
+            "top_k": top_k,
+            "include_metadata": True,
+            "namespace": namespace,
+        }
+        if filter_dict:
+            query_kwargs["filter"] = {k: {"$eq": str(v)} for k, v in filter_dict.items()}
+        results = self.index.query(**query_kwargs)
+        formatted = []
+        for match in results.matches:
+            meta = dict(match.metadata)
+            text = meta.pop("text", "")
+            formatted.append({
+                "text": text,
+                "metadata": meta,
+                "score": float(match.score),
+                "distance": 1.0 - float(match.score),
+            })
+        return formatted
+
     def search(
-        self, 
-        query: str, 
-        top_k: Optional[int] = None, 
-        filter_dict: Optional[Dict] = None
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        filter_dict: Optional[Dict] = None,
+        session_id: Optional[str] = None,
+        session_only: bool = False,  # kept for API compatibility, ignored (session_id implies session-only)
     ) -> List[Dict]:
         top_k = top_k or settings.top_k_retrieval
-        # Check collection count before search
-        collection_count = self.collection.count()
+        total_count = self.get_count()
+
         logger.info(
-            "Performing vector search",
-            extra={
-                "query": query[:100],  # Log first 100 chars
-                "top_k": top_k,
-                "filter_dict": filter_dict,
-                "collection_count": collection_count
-            }
+            "Performing Pinecone search",
+            extra={"query": query[:100], "top_k": top_k, "session_id": session_id, "total_count": total_count},
         )
 
-        if collection_count == 0:
-            logger.warning("Vector store collection is empty - no documents have been indexed")
+        if total_count == 0:
+            logger.warning("Pinecone index is empty")
             return []
 
-        # LangChain Chroma's similarity_search_with_score doesn't support where parameter
-        # Filtering must be done through metadata using filter parameter
-        # Note: filter_dict should contain metadata keys to filter by
-        filter_metadata = None
-        if filter_dict:
-            filter_metadata = filter_dict
+        query_embedding = self._embedder().embed_query(query)
 
-        # Use similarity_search_with_score with optional filter
-        # Note: Chroma filtering syntax may vary - this uses metadata-based filtering
         try:
-            if filter_metadata:
-        results = self.vectorstore.similarity_search_with_score(
-            query,
-            k=top_k, 
-                    filter=filter_metadata
-                )
+            if session_id:
+                # Document uploaded — search the session namespace only.
+                # Never mix in the global KB so it cannot override the user's document.
+                results = self._query_namespace(query_embedding, top_k, filter_dict, namespace=session_id)
             else:
-                results = self.vectorstore.similarity_search_with_score(
-                    query,
-                    k=top_k
-                )
-        except TypeError:
-            # Fallback if filter parameter not supported - search without filter
-            logger.warning(
-                "Filter parameter not supported, performing search without filter",
-                extra={"filter_dict": filter_dict}
-            )
-            results = self.vectorstore.similarity_search_with_score(
-                query,
-                k=top_k
-        )
+                # No document uploaded — fall back to the global knowledge base.
+                results = self._query_namespace(query_embedding, top_k, filter_dict, namespace="")
+        except Exception as e:
+            logger.error("Pinecone search error", extra={"error": str(e)}, exc_info=True)
+            raise
 
-        logger.debug(
-            "Vector search completed",
-            extra={"result_count": len(results)}
-        )
+        logger.info("Search complete", extra={"result_count": len(results)})
+        return results
 
-        formatted_results = []
-        for doc, score in results:
-            result = {
-                "text": doc.page_content, 
-                "metadata": doc.metadata, 
-                "score": float(score),
-                "distance": float(score)
-            }
-            formatted_results.append(result)
-        
-        logger.info(
-            "Vector search results formatted",
-            extra={
-                "result_count": len(formatted_results),
-                "avg_score": sum(r["score"] for r in formatted_results) / len(formatted_results) if formatted_results else 0
-            }
-        )
+    def delete_namespace(self, namespace: str) -> None:
+        logger.info("Deleting Pinecone namespace", extra={"namespace": namespace})
+        self.index.delete(delete_all=True, namespace=namespace)
+        logger.info("Namespace deleted", extra={"namespace": namespace})
 
-        return formatted_results
+    def get_count(self) -> int:
+        return self.index.describe_index_stats().total_vector_count
 
-    def delete_document(self, document_id: int) -> None:
-        logger.info(
-            "Deleting document from vector store",
-            extra={"document_id": document_id}
-        )
-        self.collection.delete(
-            where={"document_id": document_id}
-        )
-        logger.info(
-            "Document deleted from vector store",
-            extra={"document_id": document_id}
-        )
-
-    def get_embedding(self, text: str) -> List[float]: 
-        logger.debug(
-            "Generating embedding",
-            extra={"text_length": len(text)}
-        )
-        embedding = self.embeddings.embed_query(text)
-        logger.debug(
-            "Embedding generated",
-            extra={"text_length": len(text), "embedding_dimension": len(embedding)}
-        )
-        return embedding 
-    
-    
+    def get_embedding(self, text: str) -> List[float]:
+        return self._embedder().embed_query(text)
