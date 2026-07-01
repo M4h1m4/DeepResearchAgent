@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, ForeignKey, Index
 from sqlalchemy.orm import relationship 
 from sqlalchemy.ext.declarative import declarative_base 
 from datetime import datetime 
@@ -40,6 +40,17 @@ class Chunk(Base):
 
     def __repr__(self):
         return f"<Chunk(id={self.id}, document_id={self.document_id}, chunk_index={self.chunk_index})>"
+
+
+class SessionRecord(Base):
+    __tablename__ = "sessions"
+
+    session_id = Column(String(36), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_accessed_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    def __repr__(self):
+        return f"<SessionRecord(session_id='{self.session_id}', last_accessed='{self.last_accessed_at}')>"
 
 
 class QueryLog(Base):

@@ -3,27 +3,42 @@ import numpy as np
 from dataclasses import dataclass 
 
 from ragas import evaluate 
-from ragas.metrics import (
-    faithfulness, 
-    answer_relevance, 
-    context_precision, 
-    context_recall, 
-    answer_correctness, 
-    answer_similarity
-)
-
 from ragas.dataset_schema import EvaluationDataset  # Dataset format for RAGAS
 
 from config.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Import metrics - handle different RAGAS versions gracefully
+try:
+    # Try standard RAGAS import (v0.1+)
+    from ragas.metrics import (
+        faithfulness, 
+        answer_relevance, 
+        context_precision, 
+        context_recall, 
+        answer_correctness, 
+        answer_similarity
+    )
+except (ImportError, AttributeError) as e:
+    # If import fails, set to None and handle gracefully in code
+    logger.warning(
+        "Could not import some RAGAS metrics - some evaluation features may be limited",
+        extra={"error": str(e)}
+    )
+    faithfulness = None
+    answer_relevance = None
+    context_precision = None
+    context_recall = None
+    answer_correctness = None
+    answer_similarity = None
+
 @dataclass 
 class RetrievalMetrics:
     precision_at_k: float # of top k results how many are relevant 
     recall_at_k: float # of all relevent documents how many did we find 
     mrr: float #Mean Reciprocal Rank: position of first relevant document 
-    ncdg: float #Normalized discounted cumulative gain 
+    ndcg: float #Normalized discounted cumulative gain 
     #higher score for higher positioning 
 
     def to_dict(self) -> Dict[str, float]:
@@ -92,37 +107,92 @@ class RAGEvaluator:
         precisions = []
         recalls = []
         reciprocal_ranks = []
-        ncdgs = []
+        ndcgs = []
 
         for query, retrieved, ground_truth in zip(queries, retrieved_chunks, ground_truth_chunks):
-            gt_ids = {chunk.get("id") or chunk.get("chunk_id") for chunk in ground_truth}
-            retrieved_ids = [
-                chunk.get("id") or chunk.get("chunk_id") for chunk in retrieved[:k]
-            ]
-
-            relevant_retrieved = len([rid for rid in retrieved_ids if rid in gt_ids])
+            # Extract ground truth text content (benchmark datasets provide text, not database IDs)
+            gt_texts = []
+            for chunk in ground_truth:
+                if isinstance(chunk, dict):
+                    # Get text content from ground truth chunk
+                    text = chunk.get("text") or chunk.get("content") or str(chunk)
+                    if text and text.strip():
+                        gt_texts.append(text.lower().strip())
+                elif isinstance(chunk, str) and chunk.strip():
+                    gt_texts.append(chunk.lower().strip())
+            
+            # Extract retrieved chunk text content
+            retrieved_texts = []
+            for chunk in retrieved[:k]:
+                if isinstance(chunk, dict):
+                    # Get text content from retrieved chunk
+                    text = chunk.get("text") or chunk.get("content") or chunk.get("chunk_text") or str(chunk)
+                    if text and text.strip():
+                        retrieved_texts.append(text.lower().strip())
+                elif isinstance(chunk, str) and chunk.strip():
+                    retrieved_texts.append(chunk.lower().strip())
+            
+            # If no ground truth or no retrieved chunks, skip this query
+            if not gt_texts or not retrieved_texts:
+                precisions.append(0.0)
+                recalls.append(0.0)
+                reciprocal_ranks.append(0.0)
+                ndcgs.append(0.0)
+                continue
+            
+            # Match retrieved chunks to ground truth by text similarity (fuzzy matching)
+            # For exact match, we check if retrieved text contains or is contained in ground truth text
+            relevant_retrieved = 0
+            matched_gt_indices = set()
+            for ret_text in retrieved_texts:
+                for i, gt_text in enumerate(gt_texts):
+                    if i in matched_gt_indices:
+                        continue
+                    # Check for overlap (simple text matching - can be improved with embeddings)
+                    # Match if texts are similar (contain each other or have significant overlap)
+                    ret_words = set(ret_text.split())
+                    gt_words = set(gt_text.split())
+                    overlap_ratio = len(ret_words & gt_words) / max(len(gt_words), 1) if gt_words else 0.0
+                    
+                    if (gt_text in ret_text or ret_text in gt_text or overlap_ratio > 0.3):
+                        relevant_retrieved += 1
+                        matched_gt_indices.add(i)
+                        break
             precision = relevant_retrieved/k if k > 0 else 0.0 
             precisions.append(precision)
 
-            recall = relevant_retrieved/ len(gt_ids) if len(gt_ids) > 0 else 0.0 
+            recall = relevant_retrieved / len(gt_texts) if len(gt_texts) > 0 else 0.0 
             recalls.append(recall)
 
+            # Calculate MRR - find first relevant retrieved chunk
             rr = 0.0 
-            for rank, rid in enumerate(retrieved_ids, 1):
-                if rid in gt_ids:
-                    rr = 1.0/rank
-                    break 
+            for rank, ret_text in enumerate(retrieved_texts, 1):
+                # Check if this retrieved text matches any ground truth
+                for gt_text in gt_texts:
+                    if (gt_text in ret_text or ret_text in gt_text or 
+                        len(set(gt_text.split()) & set(ret_text.split())) / max(len(gt_text.split()), 1) > 0.5):
+                        rr = 1.0 / rank
+                        break
+                if rr > 0:
+                    break
             reciprocal_ranks.append(rr)
         
             #DCG = sum of(relevance score/log2(position+1)) for each position 
             # IDCG = ideal DCG (if all relevant docs were at top)
             # NDCG = DCG / IDCG (normalized to 0.0-1.0)
-            dcg = sum(
-                (1.0/np.log2(rank+2)) if rid in gt_ids else 0.0
-                for rank, rid in enumerate(retrieved_ids, 1)
-
-            )
-            idcg = sum(1.0 / np.log2(rank + 2) for rank in range(1, min(len(gt_ids), k) + 1))
+            dcg = 0.0
+            for rank, ret_text in enumerate(retrieved_texts, 1):
+                # Check if this retrieved text matches any ground truth
+                is_relevant = False
+                for gt_text in gt_texts:
+                    if (gt_text in ret_text or ret_text in gt_text or 
+                        len(set(gt_text.split()) & set(ret_text.split())) / max(len(gt_text.split()), 1) > 0.5):
+                        is_relevant = True
+                        break
+                if is_relevant:
+                    dcg += 1.0 / np.log2(rank + 2)
+            
+            idcg = sum(1.0 / np.log2(rank + 2) for rank in range(1, min(len(gt_texts), k) + 1))
             ndcg = dcg / idcg if idcg > 0 else 0.0
             ndcgs.append(ndcg)
 
@@ -203,8 +273,7 @@ class RAGEvaluator:
             logger.error(
                 "Error in generation evaluation",
                 extra={"error": str(e)},
-                exc_info=Tr
-                
+                exc_info=True
             )
             return GenerationMetrics(
                 faithfulness=0.0,
@@ -234,6 +303,7 @@ class RAGEvaluator:
         logger.info("Latency evaluation completed", extra=metrics.to_dict())
         
         return metrics
+    
 
 
 

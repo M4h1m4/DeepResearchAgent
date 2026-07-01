@@ -4,7 +4,8 @@ from datasets import load_dataset
 from beir import util, datasets
 import json 
 import os 
-
+import random
+from sqlalchemy.orm import Session
 
 from config.logging_config import get_logger 
 
@@ -24,7 +25,7 @@ class EvaluationDataset:
     samples: List[EvaluationSample]
     description: Optional[str] = None 
 
-    def __len__(self) --> int:
+    def __len__(self) -> int:
         return len(self.samples)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -74,11 +75,11 @@ class EvaluationDataset:
     def load(cls, filepath: str) -> "EvaluationDataset":
         #load dataset from JSON file 
         logger.info(f"Loading dataset from {filepath}")
-        with open (file, "r") as f:
+        with open(filepath, "r") as f:
             data = json.load(f)
         dataset = cls.from_dict(data)
         logger.info("Dataset Loaded successfully", extra={"num_samples": len(dataset)})
-        return data 
+        return dataset
 
 class DatasetManager: 
     def __init__(self, datasets_dir: str = "data/eval_datasets"):
@@ -95,16 +96,33 @@ class DatasetManager:
     def load_ragas_dataset(
         self, 
         dataset_name: str = "fiqa",
-        split: str = "baseline",
+        split: str = "ragas_eval",
         max_samples: Optional[int] = None
     ) -> Optional[EvaluationDataset]:
         try:
+            from datasets import load_dataset
+            
             logger.info(
-                f"Loading RAGAs dataset:{dataset_name}", 
+                f"Loading RAGAS dataset: {dataset_name}", 
                 extra={"split": split, "max_samples": max_samples}
             )
-            #Load from hugging Face datasets 
+            # Load from HuggingFace datasets 
             hf_dataset = load_dataset(f"explodinggradients/{dataset_name}", split)
+            
+            # Handle both Dataset and DatasetDict
+            # If it's a DatasetDict, extract the split
+            if hasattr(hf_dataset, 'keys'):
+                # It's a DatasetDict - get the split
+                if split in hf_dataset:
+                    hf_dataset = hf_dataset[split]
+                elif 'ragas_eval' in hf_dataset:
+                    hf_dataset = hf_dataset['ragas_eval']
+                    logger.warning(f"Split '{split}' not found, using 'ragas_eval' instead")
+                else:
+                    # Use the first available split
+                    first_split = list(hf_dataset.keys())[0]
+                    hf_dataset = hf_dataset[first_split]
+                    logger.warning(f"Using first available split: '{first_split}'")
 
             if max_samples:
                 hf_dataset = hf_dataset.select(range(min(max_samples, len(hf_dataset))))
@@ -149,12 +167,14 @@ class DatasetManager:
             return dataset
             
         except Exception as e:
+            error_msg = f"Failed to load RAGAS dataset {dataset_name}: {str(e)}"
             logger.error(
                 f"Failed to load RAGAS dataset {dataset_name}",
-                extra={"error": str(e), "dataset_name": dataset_name},
+                extra={"error": str(e), "dataset_name": dataset_name, "error_type": type(e).__name__},
                 exc_info=True
             )
-            return None
+            # Re-raise the exception so the caller can see the actual error
+            raise ValueError(error_msg) from e
 
     def load_beir_dataset(
         self, 
@@ -277,3 +297,112 @@ class DatasetManager:
         if os.path.exists(filepath):
             return EvaluationDataset.load(filepath)
         return None
+    
+    def create_dataset_from_database(
+        self,
+        db_session: Session,
+        max_samples: Optional[int] = 20,
+        min_chunk_length: int = 100
+    ) -> Optional[EvaluationDataset]:
+        """
+        Create an evaluation dataset from existing documents in the database.
+        This ensures ground truth matches your actual database content.
+        
+        Args:
+            db_session: SQLAlchemy database session
+            max_samples: Maximum number of samples to create
+            min_chunk_length: Minimum chunk text length to include
+            
+        Returns:
+            EvaluationDataset with samples based on existing chunks
+        """
+        try:
+            from app.models import Chunk, Document
+            
+            logger.info(
+                "Creating evaluation dataset from database",
+                extra={"max_samples": max_samples, "min_chunk_length": min_chunk_length}
+            )
+            
+            # Query chunks from database
+            chunks = db_session.query(Chunk).join(Document).filter(
+                Chunk.text.isnot(None),
+                Chunk.text != "",
+                Chunk.text.length() >= min_chunk_length
+            ).all()
+            
+            if not chunks:
+                logger.warning("No chunks found in database to create evaluation dataset")
+                return None
+            
+            # Randomly sample chunks
+            if len(chunks) > max_samples:
+                chunks = random.sample(chunks, max_samples)
+            else:
+                chunks = chunks[:max_samples]
+            
+            samples = []
+            for chunk in chunks:
+                # Extract a query from the chunk (use first sentence or key phrase)
+                chunk_text = chunk.text.strip()
+                
+                # Simple query generation: use first sentence or first 50 words
+                if '.' in chunk_text:
+                    query = chunk_text.split('.')[0].strip()
+                    if len(query) < 20:  # If first sentence is too short, use first 50 words
+                        words = chunk_text.split()[:50]
+                        query = ' '.join(words)
+                        if len(query) > 200:
+                            query = query[:200] + "..."
+                else:
+                    words = chunk_text.split()[:50]
+                    query = ' '.join(words)
+                    if len(query) > 200:
+                        query = query[:200] + "..."
+                
+                # Create ground truth chunk entry
+                ground_truth_chunk = {
+                    "id": chunk.id,
+                    "text": chunk_text,
+                    "chunk_index": chunk.chunk_index,
+                    "document_id": chunk.document_id
+                }
+                
+                # Get document info for metadata
+                doc = db_session.query(Document).filter(Document.id == chunk.document_id).first()
+                doc_title = doc.title if doc else f"Document {chunk.document_id}"
+                
+                sample = EvaluationSample(
+                    query=query,
+                    ground_truth_chunks=[ground_truth_chunk],
+                    ground_truth_answer=None,  # Can be generated later if needed
+                    expected_sources=[doc_title] if doc else [],
+                    metadata={
+                        "source": "database",
+                        "chunk_id": chunk.id,
+                        "document_id": chunk.document_id,
+                        "document_title": doc_title,
+                        "chunk_index": chunk.chunk_index
+                    }
+                )
+                samples.append(sample)
+            
+            dataset = EvaluationDataset(
+                name="custom_database",
+                samples=samples,
+                description=f"Custom evaluation dataset from database ({len(samples)} samples)"
+            )
+            
+            logger.info(
+                "Dataset created from database successfully",
+                extra={"num_samples": len(samples), "num_chunks_available": len(chunks)}
+            )
+            return dataset
+            
+        except Exception as e:
+            logger.error(
+                "Failed to create dataset from database",
+                extra={"error": str(e), "error_type": type(e).__name__},
+                exc_info=True
+            )
+            return None

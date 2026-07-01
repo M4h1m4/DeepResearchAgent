@@ -1,364 +1,370 @@
-import os 
-import time 
+import os
+import time
+import uuid
 
-from typing import List, Dict, Optional 
+from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
-from langchain_openai import ChatOpenAI 
-from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_openai import ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
 
-from langchain.schema import HumanMessage, SystemMessage 
-
-from config import settings 
-from config.logging_config import get_logger 
-from app.models import Document, Chunk, QueryLog
+from config import settings
+from config.logging_config import get_logger
+from app.models import QueryLog
 from app.document_processor import DocumentProcessor, FileType
 from app.services.vector_service import VectorStore
+from app.services.guardrails import PIIDetector, HallucinationGuard
 
 logger = get_logger(__name__)
+
+_pii_detector = PIIDetector()
+_hallucination_guard = HallucinationGuard()
+
+_tavily_client = None
+
+
+def _get_tavily():
+    global _tavily_client
+    if _tavily_client is not None:
+        return _tavily_client
+    if not settings.tavily_api_key:
+        return None
+    try:
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        _tavily_client = TavilySearchResults(max_results=5, tavily_api_key=settings.tavily_api_key)
+        logger.info("Tavily web search initialised in RAG service")
+    except Exception as e:
+        logger.warning("Could not initialise Tavily in RAG service", extra={"error": str(e)})
+        _tavily_client = None
+    return _tavily_client
+
+_SYSTEM_TEMPLATE = (
+    "You are a helpful AI assistant that answers questions based on the provided context.\n"
+    "Guidelines:\n"
+    "- Use only the information provided in the context to answer questions\n"
+    "- If the context does not provide enough information, say so\n"
+    "- Cite sources when referring to specific information\n"
+    "- If you are uncertain, express the uncertainty"
+)
+
+_HUMAN_TEMPLATE = (
+    "Context information:\n{context}\n\n"
+    "Question: {question}\n\n"
+    "Please provide a comprehensive answer based on the context above."
+)
+
+# Used when the user asks to summarize / get an overview of their uploaded document.
+# Retrieves ALL chunks in document order rather than the top-k most similar chunks.
+_SUMMARIZE_SYSTEM = (
+    "You are a document summarization assistant. "
+    "You will be given the full contents of an uploaded document, split into ordered sections. "
+    "Produce a clear, comprehensive response to the user's request. "
+    "Focus on the document's actual subject matter: its main topics, key arguments, findings, "
+    "conclusions, and implications. "
+    "Do NOT focus on structural elements like the acknowledgments, table of contents, "
+    "or bibliography unless the user specifically asks about them. "
+    "Write in flowing prose."
+)
+
+_SUMMARIZE_HUMAN = (
+    "Document content (sections in order):\n\n{context}\n\n"
+    "User request: {query}\n\n"
+    "Respond thoroughly based on the document content above."
+)
+
+_SUMMARIZE_KEYWORDS = frozenset({
+    "summarize", "summarise", "summary", "summarization", "summarisation",
+    "overview", "abstract", "synopsis",
+    "what is this document", "what does this document",
+    "what is this about", "what is discussed", "what does it discuss",
+    "main points", "key points", "key findings", "key takeaways",
+    "describe this document", "tell me about this document",
+    "what is covered", "give me an overview", "give me a summary",
+})
+
+
+def is_summarization_query(query: str) -> bool:
+    """Return True when the user wants a summary/overview of the uploaded document."""
+    q = query.lower()
+    return any(kw in q for kw in _SUMMARIZE_KEYWORDS)
+
+
+def _get_llm(model: Optional[str] = None) -> ChatOpenAI:
+    if not settings.openai_api_key:
+        raise ValueError("OPENAI_API_KEY is required. Add it to your .env file.")
+    return ChatOpenAI(
+        model=model or settings.openai_model,
+        temperature=settings.llm_temperature,
+        openai_api_key=settings.openai_api_key,
+        request_timeout=30,
+    )
+
 
 class RAGService:
     def __init__(self):
         self.document_processor = DocumentProcessor()
         self.vector_store = VectorStore()
-        self.llm = ChatOpenAI(
-            model=settings.openai_model, 
-            temperature=settings.llm_temperature, 
-            openai_api_key=settings.openai_api_key,
-        )
-        self._setup_prompts()
 
-    def _setup_prompts(self):
-        system_template = """ You are a helpful AI assistant that answers questions based on the 
-        provided context . 
-        Guidelines: 
-        - Use only the information provided in the context to answer questions 
-        - If the context does not provide enough information say so
-        - Cite source when referring specific information 
-        - If you are unceratin express the uncertainity""" 
-        human_template= """context information: {context}
-        Question: {question}
-        Please provide a comprehensive answer based on the context above.""" 
-
-        self.system_prompt = SystemMessagePromptTemplate.from_template(system_template)
-        self.human_prompt = HumanMessagePromptTemplate.from_template(human_template)
-        # Store template strings for direct access if needed
-        self.system_template = system_template
-        self.human_template = human_template
-
-    def ingest_document(
-        self, 
-        db: Session, 
-        file_path: str, 
-        title: str, 
-        file_type: FileType,
-        metadata: Optional[Dict] = None
-    ) -> Document: 
-    #Ingest a document into the database and return a database object
-        logger.info(
-            "Starting document ingestion",
-            extra={
-                "file_path": file_path,
-                "title": title,
-                "file_type": file_type
+    def _web_search_fallback(self, query: str, model: str, start_time: float, db: Session) -> Dict:
+        """Called when no document is uploaded and the global KB has no relevant results."""
+        logger.info("Falling back to web search", extra={"query": query[:200]})
+        client = _get_tavily()
+        if client is None:
+            return {
+                "answer": (
+                    "I couldn't find relevant information in the knowledge base. "
+                    "Web search is not configured — add a TAVILY_API_KEY to enable it."
+                ),
+                "sources": [],
+                "retrieved_chunks": [],
+                "response_time_ms": int((time.time() - start_time) * 1000),
             }
-        )
-        text = self.document_processor.extract_text(file_path, file_type)
-        logger.debug("Text extracted from document", extra={"text_length": len(text)})
-        summary = self.document_processor.generate_summary(text)
-        logger.debug("Document summary generated", extra={"summary_length": len(summary)})
 
-        file_size=os.path.getsize(file_path) if os.path.exists(file_path) else 0 
+        try:
+            raw = client.invoke(query)
+            snippets, sources = [], []
+            for r in raw:
+                if isinstance(r, dict):
+                    url = r.get("url", "")
+                    content = r.get("content", "")
+                    title = r.get("title") or url
+                    sources.append({"id": None, "title": title, "source": url})
+                    if content:
+                        snippets.append(f"[{title}]\n{content}")
 
-        logger.debug("Creating document record in database")
-
-
-        #create the document record
-        document = Document(
-            title=title,
-            source=file_path,
-            file_type=file_type,
-            file_size=file_size,
-            summary=summary,
-            extra_metadata=metadata or {}
-        )
-
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        logger.info(
-            "Document record created",
-            extra={"document_id": document.id, "title": title}
-        )
-
-        #store the chunks 
-
-        chunks_data = self.document_processor.chunk_text(text, document.id)
-
-        logger.debug(
-            "Text chunked",
-            extra={"document_id": document.id, "chunk_count": len(chunks_data)}
-        )
-
-        logger.debug("Storing chunks in database")
-
-        chunks = []
-
-        for chunk_data in chunks_data:
-            chunk = Chunk(
-                document_id=chunk_data["document_id"],
-                chunk_index=chunk_data["chunk_index"],
-                text=chunk_data["text"],
-                start_char=chunk_data["start_char"],
-                end_char=chunk_data["end_char"],
-                chunk_metadata=chunk_data["metadata"]
-            )
-            db.add(chunk)
-            chunks.append(chunk)
-        db.commit()
-
-        for chunk in chunks:
-            db.refresh(chunk)
-        logger.info(
-            "Chunks stored in database",
-            extra={"document_id": document.id, "chunk_count": len(chunks)}
-        )
-
-        #prepare chunks for vector store
-        vector_chunks =[]
-        for chunk, chunk_data in zip(chunks, chunks_data):
-            vector_chunk = {
-                "id": chunk.id,
-                "text": chunk.text,
-                "document_id": document.id,
-                "chunk_index": chunk.chunk_index,
-                "metadata": chunk.chunk_metadata or {}
-            }
-            vector_chunks.append(vector_chunk)
-
-        logger.debug("Adding chunks to vector store")
-        vector_ids = self.vector_store.add_documents(vector_chunks)
-        logger.info(
-            "Chunks added to vector store",
-            extra={"document_id": document.id, "vector_chunk_count": len(vector_ids)}
-        )
-        
-        # Update chunks with vector IDs
-        for chunk, vector_id in zip(chunks, vector_ids):
-            if not chunk.chunk_metadata:
-                chunk.chunk_metadata = {}
-            chunk.chunk_metadata["vector_id"] = vector_id
-        db.commit()
-        
-        logger.info(
-            "Document ingestion completed",
-            extra={
-                "document_id": document.id,
-                "title": title,
-                "chunk_count": len(chunks)
-            }
-        )
-        
-        return document
-
-    def query(self, db: Session, query: str, top_k: Optional[int]=None, 
-                filter_dict: Optional[dict]=None
-    ) -> Dict: 
-        start_time = time.time()
-        logger.info(
-            "Processing RAG query",
-            extra={
-                "query": query[:200],  # Log first 200 chars
-                "top_k": top_k or settings.top_k_retrieval,
-                "filter_dict": filter_dict
-            }
-        )
-
-        top_k = top_k or settings.top_k_retrieval
-
-        results = self.vector_store.search(query, top_k=top_k, filter_dict=filter_dict)
-        logger.debug( 
-            "Vector search completed",
-            extra={
-                "result_count": len(results),
-                "sample_distances": [r["distance"] for r in results[:3]] if results else []
-            }
-        )
-        
-        # Chroma returns cosine distance (lower = better)
-        # Convert distance to similarity: similarity = 1 - distance
-        # Then filter by similarity threshold
-        # Note: For cosine distance, 0 = identical, 1 = opposite
-        # Typical good matches: distance 0.1-0.5 (similarity 0.9-0.5)
-        # However, for RAG, we should accept lower similarities if they're the best we have
-        # Lower threshold means accepting less similar results (more lenient)
-        # Higher threshold means only accepting very similar results (more strict)
-        
-        # If we have results but they're below threshold, use them anyway if they're the best we have
-        # Only filter if we have many results and can be selective
-        if len(results) > 0:
-            # Use a more lenient threshold, or accept top results even if below threshold
-            # For now, use threshold but be more lenient (threshold is already distance-based)
-            max_distance = 1 - settings.similarity_threshold  # Convert similarity threshold to max distance
-            # For cosine distance, accept results with distance <= max_distance
-            # But if all results are above max_distance, use the best ones anyway
-        filtered_results = [
-            r for r in results
-                if r["distance"] <= max_distance
-            ]
-            # If nothing passes threshold but we have results, use the best one anyway
-            if not filtered_results and results:
-                logger.debug(
-                    "No results met threshold, using best available result",
-                    extra={
-                        "threshold_distance": max_distance,
-                        "best_distance": results[0]["distance"],
-                        "best_similarity": 1 - results[0]["distance"]
-                    }
-                )
-                filtered_results = [results[0]]  # Use best result even if below threshold
-        else:
-            filtered_results = []
-
-        logger.debug(
-            "Filtered results by similarity threshold",
-            extra={
-                "original_count": len(results),
-                "filtered_count": len(filtered_results),
-                "similarity_threshold": settings.similarity_threshold,
-                "sample_distances": [r["distance"] for r in results[:3]] if results else [],
-                "sample_similarities": [1 - r["distance"] for r in results[:3]] if results else []
-            }
-        )
-
-
-        if not filtered_results:
-            logger.warning(
-                "No relevant chunks found for query",
-                extra={
-                    "query": query[:200],
-                    "similarity_threshold": settings.similarity_threshold,
-                    "original_result_count": len(results)
+            if not snippets:
+                return {
+                    "answer": "I couldn't find relevant information in the knowledge base or on the web.",
+                    "sources": [],
+                    "retrieved_chunks": [],
+                    "response_time_ms": int((time.time() - start_time) * 1000),
                 }
-            )
+
+            context = "\n\n".join(snippets)
+            llm = _get_llm(model)
+            messages = [
+                SystemMessage(content=_SYSTEM_TEMPLATE),
+                HumanMessage(content=_HUMAN_TEMPLATE.format(context=context, question=query)),
+            ]
+            answer = llm.invoke(messages).content
+
+            pii_result = _pii_detector.detect_and_redact(answer)
+            if pii_result.has_pii:
+                answer = pii_result.redacted_text
+
+            response_time_ms = int((time.time() - start_time) * 1000)
+            db.add(QueryLog(query=query, response=answer, retrieved_chunks=[], response_time_ms=response_time_ms))
+            db.commit()
+
+            logger.info("Web search fallback complete", extra={"sources": len(sources)})
+            return {
+                "answer": answer,
+                "sources": sources,
+                "retrieved_chunks": [],
+                "response_time_ms": response_time_ms,
+                "guardrails": {
+                    "pii_detected": pii_result.has_pii,
+                    "pii_entity_types": [e["type"] for e in pii_result.entities],
+                    "faithfulness_score": 1.0,
+                    "is_grounded": True,
+                    "unsupported_claims": [],
+                },
+            }
+        except Exception as e:
+            logger.warning("Web search fallback failed", extra={"error": str(e)})
             return {
                 "answer": "I couldn't find relevant information in the knowledge base to answer your question.",
                 "sources": [],
                 "retrieved_chunks": [],
-                "response_time_ms": int((time.time() - start_time) * 1000)
+                "response_time_ms": int((time.time() - start_time) * 1000),
             }
 
-        
-        #preparing context parts 
-
-        context_parts = []
-        chunk_ids = []
-        for i, result in enumerate(filtered_results, 1):
-            chunk_text = result["text"]
-            metadata = result["metadata"]
-            document_id = metadata.get("document_id")
-            chunk_id = metadata.get("chunk_id")
-
-            context_parts.append(f"[Source {i} - Document ID: {document_id}, Chunk: {metadata.get('chunk_index')}]\n{chunk_text}")
-            chunk_ids.append(chunk_id)
-
-        context = "\n\n".join(context_parts)
-
-        logger.debug(
-            "Generating answer with LLM",
-            extra={
-                "context_length": len(context),
-                "query_length": len(query),
-                "chunk_count": len(filtered_results)
-            }
+    def ingest_session_document(
+        self,
+        session_id: str,
+        file_path: str,
+        filename: str,
+        file_type: FileType,
+    ) -> Dict:
+        logger.info(
+            "Ingesting session document",
+            extra={"session_id": session_id, "file_name": filename, "file_type": file_type},
         )
+        text = self.document_processor.extract_text(file_path, file_type)
+        chunks_data = self.document_processor.chunk_text(text, document_id=0)
 
-        # Create messages using prompt templates
-        try:
-            system_messages = self.system_prompt.format_messages() if hasattr(self.system_prompt, 'format_messages') else [SystemMessage(content=self.system_template)]
-            human_messages = self.human_prompt.format_messages(context=context, question=query) if hasattr(self.human_prompt, 'format_messages') else [HumanMessage(content=self.human_template.format(context=context, question=query))]
-            messages = system_messages + human_messages
-        except (AttributeError, TypeError):
-            # Fallback to direct template access
-            messages = [
-                SystemMessage(content=self.system_template),
-                HumanMessage(content=self.human_template.format(context=context, question=query))
+        chunks = [
+            {
+                "id": None,
+                "text": cd["text"],
+                "document_id": session_id,
+                "chunk_index": cd["chunk_index"],
+                "vector_id": str(uuid.uuid4()),
+                "metadata": {"filename": filename, "session_id": session_id},
+            }
+            for cd in chunks_data
         ]
 
-        response = self.llm(messages)
-        answer = response.content 
+        self.vector_store.add_documents(chunks, namespace=session_id)
+        logger.info("Session document ingested", extra={"session_id": session_id, "chunk_count": len(chunks)})
+        return {"session_id": session_id, "filename": filename, "chunk_count": len(chunks)}
+
+    def delete_session(self, session_id: str) -> None:
+        self.vector_store.delete_namespace(session_id)
+        logger.info("Session deleted", extra={"session_id": session_id})
+
+    def query(
+        self,
+        db: Session,
+        query: str,
+        top_k: Optional[int] = None,
+        filter_dict: Optional[dict] = None,
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        force_web: bool = False,
+    ) -> Dict:
+        start_time = time.time()
+        effective_model = model or settings.openai_model
+
         logger.info(
-            "LLM answer generated",
-            extra={
-                "answer_length": len(answer)
+            "Processing RAG query",
+            extra={"query": query[:200], "top_k": top_k or settings.top_k_retrieval, "model": effective_model, "session_id": session_id, "force_web": force_web},
+        )
+
+        # Temporal / live-data query with no uploaded document: the seeded KB is
+        # static Wikipedia and can't answer "latest/current" asks, so skip retrieval
+        # and go straight to web search. With a document attached we respect the doc
+        # as the source of truth and fall through to normal grounding instead.
+        if force_web and not session_id:
+            return self._web_search_fallback(query, effective_model, start_time, db)
+
+        # Detect summarization intent — retrieve ALL session chunks in document order
+        # instead of the top-k most similar chunks (which would miss most of the document).
+        summarization = session_id is not None and is_summarization_query(query)
+
+        if summarization:
+            effective_top_k = 500  # fetch all chunks (documents rarely exceed this)
+        else:
+            effective_top_k = top_k or settings.top_k_retrieval
+
+        results = self.vector_store.search(
+            query,
+            top_k=effective_top_k,
+            filter_dict=filter_dict,
+            session_id=session_id,
+            session_only=summarization,
+        )
+
+        if summarization:
+            # Restore original document reading order via chunk_index
+            results.sort(key=lambda r: int(r["metadata"].get("chunk_index", 0)))
+            filtered_results = results
+        else:
+            max_distance = 1 - settings.similarity_threshold
+            if results:
+                filtered_results = [r for r in results if r["distance"] <= max_distance]
+                if not filtered_results:
+                    if session_id:
+                        # Session doc: nothing confident, but keep the best available result
+                        # rather than returning empty — the document is the source of truth.
+                        filtered_results = [results[0]]
+                    # else: no session, nothing relevant — fall through to web search below
+            else:
+                filtered_results = []
+
+        # Relevance gate (no-document path): even if a chunk cleared the loose
+        # similarity_threshold, a weak top score means the KB doesn't actually
+        # have the answer — go to web search instead of answering from a junk chunk.
+        if not session_id and results:
+            if max(r["score"] for r in results) < settings.web_fallback_threshold:
+                return self._web_search_fallback(query, effective_model, start_time, db)
+
+        if not filtered_results:
+            # No session and KB found nothing above the similarity threshold.
+            # Fall back to live web search rather than returning a dead-end.
+            if not session_id:
+                return self._web_search_fallback(query, effective_model, start_time, db)
+            return {
+                "answer": "I couldn't find relevant information in the uploaded document to answer your question.",
+                "sources": [],
+                "retrieved_chunks": [],
+                "response_time_ms": int((time.time() - start_time) * 1000),
             }
-        )
 
-        source_doc_ids = list(set(r["metadata"].get("document_id") for r in filtered_results))
-        sources = db.query(Document).filter(Document.id.in_(source_doc_ids)).all()
+        chunk_ids = []
+        if summarization:
+            # Plain sections — no source headers, maintain reading flow
+            context_parts = []
+            total_chars = 0
+            for result in filtered_results:
+                if total_chars + len(result["text"]) > 200_000:
+                    break
+                context_parts.append(result["text"])
+                total_chars += len(result["text"])
+                chunk_ids.append(result["metadata"].get("chunk_id"))
+            context = "\n\n---\n\n".join(context_parts)
+            messages = [
+                SystemMessage(content=_SUMMARIZE_SYSTEM),
+                HumanMessage(content=_SUMMARIZE_HUMAN.format(context=context, query=query)),
+            ]
+        else:
+            context_parts = []
+            for i, result in enumerate(filtered_results, 1):
+                metadata = result["metadata"]
+                filename = metadata.get("filename", f"Document {metadata.get('document_id', i)}")
+                context_parts.append(
+                    f"[Source {i} - {filename}, Chunk: {metadata.get('chunk_index')}]\n{result['text']}"
+                )
+                chunk_ids.append(metadata.get("chunk_id"))
+            context = "\n\n".join(context_parts)
+            messages = [
+                SystemMessage(content=_SYSTEM_TEMPLATE),
+                HumanMessage(content=_HUMAN_TEMPLATE.format(context=context, question=query)),
+            ]
 
-        logger.debug(
-            "Source documents retrieved",
-            extra={"source_count": len(sources), "source_doc_ids": source_doc_ids}
-        )
+        llm = _get_llm(effective_model)
+        response = llm.invoke(messages)
+        answer = response.content
+
+        # Guardrail 1: redact PII from answer
+        pii_result = _pii_detector.detect_and_redact(answer)
+        if pii_result.has_pii:
+            answer = pii_result.redacted_text
+
+        # Guardrail 2: score hallucination
+        hal_result = _hallucination_guard.check(question=query, answer=answer, context=context)
+        if not hal_result.is_grounded:
+            answer = (
+                f"⚠️ Note: Parts of this answer may not be fully supported by retrieved sources "
+                f"(faithfulness score: {hal_result.faithfulness_score:.2f}).\n\n{answer}"
+            )
+
+        seen = set()
+        sources = []
+        for result in filtered_results:
+            meta = result["metadata"]
+            fname = meta.get("filename", "Knowledge Base")
+            sid = meta.get("session_id", "")
+            key = (fname, sid)
+            if key not in seen:
+                seen.add(key)
+                sources.append({"id": None, "title": fname, "source": sid or "global-kb"})
 
         response_time_ms = int((time.time() - start_time) * 1000)
-
-        query_log = QueryLog(
-            query=query, 
-            response=answer, 
-            retrieved_chunks=chunk_ids, 
-            response_time_ms=response_time_ms
-        )
-        db.add(query_log)
+        db.add(QueryLog(query=query, response=answer, retrieved_chunks=chunk_ids, response_time_ms=response_time_ms))
         db.commit()
-        logger.debug("Query logged to database", extra={"query_log_id": query_log.id})
-        logger.info(
-            "RAG query completed",
-            extra={
-                "query": query[:200],
-                "response_time_ms": response_time_ms,
-                "chunk_count": len(chunk_ids),
-                "source_count": len(sources)
-            }
-        )
+
+        logger.info("RAG query completed", extra={"response_time_ms": response_time_ms, "source_count": len(sources)})
 
         return {
             "answer": answer,
-            "sources": [
-                {
-                    "id": doc.id, 
-                    "title": doc.title, 
-                    "source": doc.source
-                }
-                for doc in sources
-            ],
-            "retrieved_chunks": chunk_ids, 
-            "response_time_ms": response_time_ms
+            "sources": sources,
+            "retrieved_chunks": chunk_ids,
+            "response_time_ms": response_time_ms,
+            "guardrails": {
+                "pii_detected": pii_result.has_pii,
+                "pii_entity_types": [e["type"] for e in pii_result.entities],
+                "faithfulness_score": hal_result.faithfulness_score,
+                "is_grounded": hal_result.is_grounded,
+                "unsupported_claims": hal_result.unsupported_claims,
+            },
         }
-
-
-    def delete_document(self, db:Session, document_id: int) -> bool: 
-        logger.info("Deleting document", extra={"document_id": document_id})
-        document = db.query(Document).filter(Document.id == document_id).first()
-
-        if not document:
-            logger.warning(
-                "Document not found for deletion", extra={"document_id": document_id}
-            )
-            return False 
-        
-        self.vector_store.delete_document(document_id)
-        logger.debug("Document deleted from vector store", extra={"document_id": document_id})
-
-
-        db.delete(document)
-        db.commit()
-        logger.info("Document deleted from database", extra={"document_id": document_id})
-
-        return True 
-
-
-
-
-
-

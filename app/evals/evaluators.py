@@ -21,7 +21,7 @@ class FastRAGEvaluator:
     def evaluate(
         self, 
         dataset: EvaluationDataset, 
-        db_Session
+        db_session
     ) -> Dict[str, Any]:
         logger.info(
             "Starting Fast RAG evaluation",
@@ -31,7 +31,7 @@ class FastRAGEvaluator:
         queries = [sample.query for sample in dataset.samples]
         answers = []
         retrieved_chunks_list = []
-        context_list = []
+        contexts_list = []
         latency_data = [] 
 
         for i, sample in enumerate(dataset.samples):
@@ -45,13 +45,30 @@ class FastRAGEvaluator:
             total_time = (time.time() - start_time) * 1000 
             answers.append((result.get("answer", "")))
             retrieved_chunks = result.get("retrieved_chunks", [])
-            retrieved_chunks_list.append(retrieved_chunks)
             
-            contexts = [
-                chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
-                for chunk in retrieved_chunks
-            ]
-            contexts_list.append(contexts)
+            # Get chunk text from database if we only have IDs
+            # The RAG service returns chunk IDs, but we need text for evaluation
+            chunk_texts = []
+            if retrieved_chunks and isinstance(retrieved_chunks[0], (int, str)):
+                # Fetch chunk text from database using IDs
+                from app.models import Chunk
+                chunk_objs = db_session.query(Chunk).filter(Chunk.id.in_(retrieved_chunks)).all()
+                chunk_dict = {chunk.id: chunk.text for chunk in chunk_objs}
+                chunk_texts = [chunk_dict.get(cid, "") for cid in retrieved_chunks]
+            else:
+                # Already have dictionaries with text
+                chunk_texts = [
+                    chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                    for chunk in retrieved_chunks
+                ]
+            
+            # Store both IDs and text for evaluation
+            retrieved_chunks_list.append([
+                {"id": cid, "text": text} if isinstance(cid, (int, str)) else cid
+                for cid, text in zip(retrieved_chunks, chunk_texts)
+            ])
+            
+            contexts_list.append(chunk_texts)
             
             latency_data.append({
                 "total_time_ms": total_time,
@@ -110,7 +127,29 @@ class FastRAGEvaluator:
         return results
     
 class DeepResearchEvaluator:
-    logger.info(
+    """Evaluates Deep Research mode."""
+    
+    def __init__(self):
+        self.deep_research_service = DeepResearchService()
+        self.metrics_evaluator = RAGEvaluator()
+        logger.info("DeepResearchEvaluator initialized")
+    
+    def evaluate(
+        self,
+        dataset: EvaluationDataset,
+        db_session
+    ) -> Dict[str, Any]:
+        """
+        Evaluate Deep Research on a dataset.
+        
+        Args:
+            dataset: EvaluationDataset
+            db_session: Database session
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        logger.info(
             "Starting Deep Research evaluation",
             extra={"dataset_name": dataset.name, "num_samples": len(dataset)}
         )

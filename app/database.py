@@ -1,22 +1,33 @@
-from sqlalchemy import create_engine 
-from sqlalchemy.orm import sessionmaker, Session 
-from typing import Generator 
+import sqlite3
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker, Session
+from typing import Generator
 
-from config import settings 
+from config import settings
 from config.logging_config import get_logger
 from app.models import Base
 
 logger = get_logger(__name__)
 
+
+@event.listens_for(Engine, "connect")
+def _set_sqlite_wal(dbapi_connection, connection_record):
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+
 class Database:
     def __init__(self):
         logger.info(
-            "Initializing the database connection", 
+            "Initializing the database connection",
             extra={"database_url": settings.database_url.split("@")[-1] if "@" in settings.database_url
             else settings.database_url  }
         )
-        self.engine = create_engine( #creates a database connection pool
-            settings.database_url, 
+        self.engine = create_engine(
+            settings.database_url,
             connect_args = {"check_same_thread": False} if "sqlite" in settings.database_url else {}
         )
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine) 

@@ -28,10 +28,55 @@ class EvaluationRunner:
         logger.info("Running Fast RAG evaluation")
         if dataset is None:
             if dataset_name is None:
-                raise ValueError("Either dataset name or dataset is provided")
-            dataset = self.dataset_manager.get_dataset(dataset_name)
-            if dataset is None:
-                raise ValueError(f"Dataset '{dataset_name}' not found")
+                raise ValueError("Either dataset_name or dataset must be provided")
+            
+            # Check if user wants to create dataset from database
+            if dataset_name == "custom_database" or dataset_name == "database":
+                logger.info("Creating evaluation dataset from database")
+                db_gen = get_db()
+                db = next(db_gen)
+                try:
+                    dataset = self.dataset_manager.create_dataset_from_database(
+                        db_session=db,
+                        max_samples=10
+                    )
+                    if dataset is None:
+                        raise ValueError("Failed to create dataset from database. Make sure you have documents uploaded.")
+                finally:
+                    db.close()
+            else:
+                # Try to load as benchmark dataset first (RAGAS)
+                available_benchmarks = self.dataset_manager.list_available_benchmarks()
+                if dataset_name in available_benchmarks.get("ragas", []):
+                    logger.info(f"Loading RAGAS benchmark dataset: {dataset_name}")
+                    try:
+                        dataset = self.dataset_manager.load_ragas_dataset(
+                            dataset_name=dataset_name,
+                            max_samples=10  # Limit to 10 for faster testing
+                        )
+                        if dataset is None:
+                            raise ValueError(f"Failed to load RAGAS dataset '{dataset_name}'. Check server logs for details.")
+                    except Exception as e:
+                        logger.error(f"Error loading RAGAS dataset {dataset_name}: {str(e)}", exc_info=True)
+                        raise ValueError(f"Failed to load RAGAS dataset '{dataset_name}': {str(e)}")
+                elif dataset_name in available_benchmarks.get("beir", []):
+                    logger.info(f"Loading BEIR benchmark dataset: {dataset_name}")
+                    try:
+                        dataset = self.dataset_manager.load_beir_dataset(
+                            dataset_name=dataset_name,
+                            max_samples=10
+                        )
+                        if dataset is None:
+                            raise ValueError(f"Failed to load BEIR dataset '{dataset_name}'. Check server logs for details.")
+                    except Exception as e:
+                        logger.error(f"Error loading BEIR dataset {dataset_name}: {str(e)}", exc_info=True)
+                        raise ValueError(f"Failed to load BEIR dataset '{dataset_name}': {str(e)}")
+                else:
+                    # Try loading from saved datasets
+                    dataset = self.dataset_manager.get_dataset(dataset_name)
+                
+                if dataset is None:
+                    raise ValueError(f"Dataset '{dataset_name}' not found. Available benchmarks: {available_benchmarks}. Use 'custom_database' to create from your documents.")
         
         db_gen = get_db()
         db = next(db_gen)
@@ -62,9 +107,27 @@ class EvaluationRunner:
         if dataset is None:
             if dataset_name is None:
                 raise ValueError("Either dataset_name or dataset must be provided")
-            dataset = self.dataset_manager.get_dataset(dataset_name)
+            
+            # Try to load as benchmark dataset first (RAGAS)
+            available_benchmarks = self.dataset_manager.list_available_benchmarks()
+            if dataset_name in available_benchmarks.get("ragas", []):
+                logger.info(f"Loading RAGAS benchmark dataset: {dataset_name}")
+                dataset = self.dataset_manager.load_ragas_dataset(
+                    dataset_name=dataset_name,
+                    max_samples=10  # Limit to 50 for faster testing
+                )
+            elif dataset_name in available_benchmarks.get("beir", []):
+                logger.info(f"Loading BEIR benchmark dataset: {dataset_name}")
+                dataset = self.dataset_manager.load_beir_dataset(
+                    dataset_name=dataset_name,
+                    max_samples=10
+                )
+            else:
+                # Try loading from saved datasets
+                dataset = self.dataset_manager.get_dataset(dataset_name)
+            
             if dataset is None:
-                raise ValueError(f"Dataset '{dataset_name}' not found")
+                raise ValueError(f"Dataset '{dataset_name}' not found. Available benchmarks: {available_benchmarks}")
         
         # Get database session
         db_gen = get_db()
@@ -100,9 +163,27 @@ class EvaluationRunner:
         if dataset is None:
             if dataset_name is None:
                 raise ValueError("Either dataset_name or dataset must be provided")
-            dataset = self.dataset_manager.get_dataset(dataset_name)
+            
+            # Try to load as benchmark dataset first (RAGAS)
+            available_benchmarks = self.dataset_manager.list_available_benchmarks()
+            if dataset_name in available_benchmarks.get("ragas", []):
+                logger.info(f"Loading RAGAS benchmark dataset: {dataset_name}")
+                dataset = self.dataset_manager.load_ragas_dataset(
+                    dataset_name=dataset_name,
+                    max_samples=10  # Limit to 50 for faster testing
+                )
+            elif dataset_name in available_benchmarks.get("beir", []):
+                logger.info(f"Loading BEIR benchmark dataset: {dataset_name}")
+                dataset = self.dataset_manager.load_beir_dataset(
+                    dataset_name=dataset_name,
+                    max_samples=10
+                )
+            else:
+                # Try loading from saved datasets
+                dataset = self.dataset_manager.get_dataset(dataset_name)
+            
             if dataset is None:
-                raise ValueError(f"Dataset '{dataset_name}' not found")
+                raise ValueError(f"Dataset '{dataset_name}' not found. Available benchmarks: {available_benchmarks}")
         
         # Run both evaluations
         fast_rag_results = self.run_fast_rag_evaluation(dataset=dataset)
