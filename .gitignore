@@ -60,7 +60,8 @@ data/
 
 # UV
 .python-version
-uv.lock
+# uv.lock is intentionally committed — the Dockerfile runs `uv sync --frozen`,
+# which requires the lockfile to be present for reproducible Docker/HF builds.
 
 # Testing
 .pytest_cache/
