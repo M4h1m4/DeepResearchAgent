@@ -196,7 +196,7 @@ Respond with JSON only — no prose outside the JSON block:
 
         try:
             from langchain_openai import ChatOpenAI
-            from langchain.schema import HumanMessage
+            from langchain_core.messages import HumanMessage
 
             llm = ChatOpenAI(model=settings.openai_model, temperature=0.0, openai_api_key=settings.openai_api_key, request_timeout=15)
             prompt = self._PROMPT.format(

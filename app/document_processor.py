@@ -8,7 +8,7 @@ from enum import Enum
 
 import pypdf
 from docx import Document as DocxDocument
-from langchain.text_splitter import RecursiveCharacterTextSplitter 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import settings 
 from config.logging_config import get_logger 

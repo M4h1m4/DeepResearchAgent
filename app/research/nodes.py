@@ -101,7 +101,7 @@ def _should_use_web_search(query: str, rag_result: dict, state: ResearchState, l
         rag_quality = "partial — some results exist but may be outdated or incomplete"
 
     try:
-        from langchain.schema import HumanMessage
+        from langchain_core.messages import HumanMessage
         prompt = _WEB_CONFIRM_PROMPT.format(
             query=query, rag_quality=rag_quality, iteration=state.get("iteration_count", 0)
         )
