@@ -1,14 +1,3 @@
----
-title: Deep Research Agent
-emoji: 🔎
-colorFrom: indigo
-colorTo: purple
-sdk: docker
-app_port: 8000
-pinned: false
-license: mit
----
-
 # Deep Research Agent
 
 A dual-mode RAG (Retrieval-Augmented Generation) system built with **FastAPI**, **LangGraph**, and **Pinecone**. It combines a pre-seeded knowledge base, user document uploads, and live web search behind two modes: a low-latency **Fast RAG** path for interactive queries, and an iterative, multi-hop **Deep Research** agent for complex questions. Ships with a web UI, an evaluation framework (RAGAS / BEIR), guardrails (PII + hallucination), and an MCP server.
@@ -188,9 +177,6 @@ The app is deployed as a **Docker Space**. The `README.md` front-matter (`sdk: d
 3. Push to the Space's `main` branch — HF builds the `Dockerfile` and boots the app. The knowledge base auto-seeds on first startup.
 
 > HF rejects large binaries in git history (e.g. PDFs). Keep binaries out of the repo, or store them via [Xet / LFS](https://huggingface.co/docs/hub/xet). Deploying a squashed, binary-free commit is the simplest way to satisfy this.
-
-### Replit (free tier)
-Import the GitHub repo, add `OPENAI_API_KEY`, `PINECONE_API_KEY`, `TAVILY_API_KEY`, and `ENVIRONMENT=production` in the **Secrets** tab, then hit **Run**. The workspace webview URL serves the app (note: free-tier Repls sleep when inactive). A Reserved-VM deployment (`.replit` `[deployment]`) is available on paid plans for an always-on URL.
 
 ### Docker
 ```bash
