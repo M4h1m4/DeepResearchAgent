@@ -91,7 +91,7 @@ All settings live in `config/settings.py` and can be overridden via `.env`:
 | `SEED_MAX_PASSAGES` | Passages to seed | `500` |
 | `SIMILARITY_THRESHOLD` | Candidate chunk gate (0–1) | `0.3` |
 | `WEB_FALLBACK_THRESHOLD` | Below this top KB score → web search | `0.45` |
-| `MAX_RESEARCH_ITERATIONS` | Deep Research iteration cap | `3` |
+| `MAX_RESEARCH_ITERATIONS` | Deep Research iteration cap | `2` |
 | `SESSION_TTL_HOURS` | Uploaded-document session lifetime | `24` |
 
 ## Modes
@@ -100,7 +100,7 @@ All settings live in `config/settings.py` and can be overridden via `.env`:
 Single-pass retrieve + generate. With no document it answers from the Pinecone knowledge base (or falls back to web search when the KB has no confident match); with a document attached it stays grounded to that document.
 
 ### Deep Research
-A LangGraph state machine that plans sub-queries, runs retrieval + a web-search gate per sub-query, analyzes knowledge gaps, iterates (up to 3×), and synthesizes a cited final answer.
+A LangGraph state machine that plans sub-queries, runs retrieval + a web-search gate per sub-query, analyzes knowledge gaps, iterates (up to 2×), and synthesizes a cited final answer.
 
 ### Comparison (measured, end-to-end)
 
@@ -112,6 +112,14 @@ A LangGraph state machine that plans sub-queries, runs retrieval + a web-search 
 | Best for | direct questions | complex, comparative, or current-info questions |
 
 > **Note:** "sub-100 ms" refers to the Pinecone vector lookup; end-to-end latency is dominated by LLM generation and the faithfulness guardrail.
+
+### Compare mode (side-by-side)
+
+The web UI has a **Compare** button that runs the same query through **both** Fast and Deep at once and renders the results side by side, so the speed-vs-breadth trade-off is visible for that specific question:
+
+- **Progressive rendering** — the Fast pane fills the moment it's ready while Deep is still running; you never stare at a blank screen waiting on the slower mode.
+- **Coverage / breadth metrics** — each pane surfaces latency, source count, sub-questions explored (Deep), and answer depth (word count), instead of a single opaque score.
+- **Adaptive takeaway** — a plain-English verdict (*"Deep paid off here"* vs *"Fast was the right call here"*) derived from whether Deep actually returned materially more sources or depth for this query — so the comparison reflects real added value, not just that Deep ran longer.
 
 ## Query routing
 
@@ -171,6 +179,15 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Then open `http://localhost:8000` for the web UI.
 
 ## Deployment
+
+### Hugging Face Spaces (Docker)
+The app is deployed as a **Docker Space**. The `README.md` front-matter (`sdk: docker`, `app_port: 8000`) is what tells HF to build from the `Dockerfile` and serve on port 8000 — keep it intact.
+
+1. Create a **Docker** Space and add it as a git remote (e.g. `git remote add hf https://huggingface.co/spaces/<user>/<space>`).
+2. In the Space's **Settings → Variables and secrets**, add `OPENAI_API_KEY`, `PINECONE_API_KEY`, `TAVILY_API_KEY`, and `ENVIRONMENT=production`. These are read at runtime; without them the build succeeds but the app fails to start.
+3. Push to the Space's `main` branch — HF builds the `Dockerfile` and boots the app. The knowledge base auto-seeds on first startup.
+
+> HF rejects large binaries in git history (e.g. PDFs). Keep binaries out of the repo, or store them via [Xet / LFS](https://huggingface.co/docs/hub/xet). Deploying a squashed, binary-free commit is the simplest way to satisfy this.
 
 ### Replit (free tier)
 Import the GitHub repo, add `OPENAI_API_KEY`, `PINECONE_API_KEY`, `TAVILY_API_KEY`, and `ENVIRONMENT=production` in the **Secrets** tab, then hit **Run**. The workspace webview URL serves the app (note: free-tier Repls sleep when inactive). A Reserved-VM deployment (`.replit` `[deployment]`) is available on paid plans for an always-on URL.
