@@ -28,9 +28,17 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# HuggingFace/datasets cache lives under a writable HOME (HF Spaces runs as UID 1000)
+ENV HOME="/home/appuser"
+ENV HF_HOME="/home/appuser/.cache/huggingface"
 
-# Data dir created at runtime by app lifespan; pre-create here for safety
-RUN mkdir -p data/documents
+# HF Spaces (and good practice everywhere) run the container as a non-root UID 1000.
+# Create that user and give it ownership of /app so SQLite + uploaded docs are writable.
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p data/documents \
+    && chown -R appuser:appuser /app /home/appuser
+
+USER appuser
 
 EXPOSE 8000
 

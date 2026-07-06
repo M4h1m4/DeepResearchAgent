@@ -1,3 +1,14 @@
+---
+title: Deep Research Agent
+emoji: 🔎
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 8000
+pinned: false
+license: mit
+---
+
 # Deep Research Agent
 
 A dual-mode RAG (Retrieval-Augmented Generation) system built with **FastAPI**, **LangGraph**, and **Pinecone**. It combines a pre-seeded knowledge base, user document uploads, and live web search behind two modes: a low-latency **Fast RAG** path for interactive queries, and an iterative, multi-hop **Deep Research** agent for complex questions. Ships with a web UI, an evaluation framework (RAGAS / BEIR), guardrails (PII + hallucination), and an MCP server.

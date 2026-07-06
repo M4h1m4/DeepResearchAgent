@@ -91,10 +91,12 @@
 
       <!-- Mode segmented control (far right) -->
       <div class="flex p-1 rounded-xl bg-ink-850 border border-ink-700 text-sm">
-        <button id="modeBtn-fast" onclick="setMode('fast')"
+        <button id="modeBtn-fast" onclick="setMode('fast')" title="Single-pass RAG — fast answer from the knowledge base"
           class="px-4 py-1.5 rounded-lg font-medium transition-colors">⚡ Fast</button>
-        <button id="modeBtn-deep" onclick="setMode('deep')"
+        <button id="modeBtn-deep" onclick="setMode('deep')" title="Multi-step research — plans sub-queries, iterates, and cites"
           class="px-4 py-1.5 rounded-lg font-medium transition-colors">🔬 Deep</button>
+        <button id="modeBtn-compare" onclick="setMode('compare')" title="Answer with BOTH Fast and Deep, side by side, to see the quality vs speed trade-off"
+          class="px-4 py-1.5 rounded-lg font-medium transition-colors">⚖️ Compare</button>
       </div>
 
     </div>
@@ -136,6 +138,14 @@
   <!-- ── Composer ── -->
   <footer class="flex-none px-4 pb-4 pt-2 bg-gradient-to-t from-ink-950 via-ink-950 to-transparent">
     <div class="max-w-3xl mx-auto">
+
+      <!-- Compare-mode explainer (shown only when Compare is active) -->
+      <div id="compareHint" class="hidden mb-2 flex items-start gap-2 text-[12px] text-ink-400 bg-brand-500/5 border border-brand-600/20 rounded-xl px-3 py-2">
+        <span class="text-sm leading-none mt-0.5">⚖️</span>
+        <span><span class="text-brand-400 font-medium">Compare mode</span> — your question is answered by
+          <span class="text-amber-400">⚡ Fast RAG</span> and <span class="text-violet-400">🔬 Deep Research</span>
+          at the same time, shown side by side so you can see the speed vs. breadth trade-off. Fast lands in seconds; Deep can take 1–3 min.</span>
+      </div>
 
       <!-- Hidden file input -->
       <input id="fileInput" type="file" accept=".pdf,.txt,.docx" class="hidden" onchange="onFileSelected()" />
@@ -202,12 +212,16 @@
 
   function setMode(m) {
     currentMode = m;
-    ['fast', 'deep'].forEach(id => {
+    ['fast', 'deep', 'compare'].forEach(id => {
       const btn = $('modeBtn-' + id);
       const active = id === m;
       btn.className = 'px-4 py-1.5 rounded-lg font-medium transition-colors '
         + (active ? 'bg-brand-600 text-white shadow-sm' : 'text-ink-500 hover:text-gray-300');
     });
+    // Surface what Compare does and keep its "on" state obvious.
+    const compareActive = m === 'compare';
+    $('compareHint').classList.toggle('hidden', !compareActive);
+    $('input').placeholder = compareActive ? 'Ask anything — Fast vs Deep, side by side…' : 'Ask anything…';
   }
 
   function getModel() {
@@ -350,6 +364,9 @@
 
   // ── Send message ──
   async function sendMessage() {
+    // Compare is a mode: sending runs the question through both engines.
+    if (currentMode === 'compare') return compareModes();
+
     const input = $('input');
     const query = input.value.trim();
     if (!query) return;
@@ -395,6 +412,170 @@
       $('sendBtn').disabled = false;
       input.focus();
     }
+  }
+
+  // ── Compare modes (#4) ──
+  // Runs the SAME question through Fast and Deep in parallel and shows the two
+  // answers side by side with their faithfulness + latency, so the quality/cost
+  // trade-off between the modes is visible on the user's own query.
+  const FAST_BADGE = '<span class="inline-flex items-center gap-1 text-[11px] font-medium text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">⚡ Fast RAG</span>';
+  const DEEP_BADGE = '<span class="inline-flex items-center gap-1 text-[11px] font-medium text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">🔬 Deep Research</span>';
+
+  async function compareModes() {
+    const input = $('input');
+    const query = input.value.trim();
+    if (!query) return;
+
+    $('sendBtn').disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+
+    addMessage('user', query);
+    const { fastId, deepId, deltaId } = addComparisonShell();
+
+    const body = { query, model: getModel() };
+    if (sessionId) body.session_id = sessionId;
+
+    const runMode = async (mode) => {
+      try {
+        const res = await fetch(`/api/v1/query?mode=${mode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || 'Request failed');
+        }
+        return { ok: true, data: await res.json() };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    };
+
+    // Progressive: fill each pane the moment its own request resolves, so Fast
+    // visibly lands first (~9s) while Deep is still spinning (~3min). This is the
+    // whole point — the user *sees* the latency gap instead of waiting on Promise.all.
+    const fastP = runMode('fast').then((r) => {
+      const pane = $(fastId);
+      if (pane) pane.innerHTML = comparePane(FAST_BADGE, r);
+      scrollToBottom();
+      return r;
+    });
+    const deepP = runMode('deep').then((r) => {
+      const pane = $(deepId);
+      if (pane) pane.innerHTML = comparePane(DEEP_BADGE, r);
+      scrollToBottom();
+      return r;
+    });
+
+    const [fast, deep] = await Promise.all([fastP, deepP]);
+    const delta = $(deltaId);
+    if (delta) delta.innerHTML = compareDelta(fast, deep);
+    scrollToBottom();
+
+    $('sendBtn').disabled = false;
+    input.focus();
+  }
+
+  function comparePaneLoading(badgeHtml, label) {
+    return `<div class="h-full bg-ink-950/60 border border-ink-800 rounded-xl p-3">
+      <div class="flex items-center flex-wrap gap-2 mb-3">${badgeHtml}</div>
+      <div class="flex items-center gap-2.5 text-ink-500 text-[13px] py-1">
+        <span class="dot-bounce flex items-center gap-1"><span></span><span></span><span></span></span>
+        <span>${label}</span>
+      </div>
+    </div>`;
+  }
+
+  function comparePane(badgeHtml, res) {
+    if (!res.ok) {
+      return `<div class="h-full bg-ink-950/60 border border-ink-800 rounded-xl p-3">
+        <div class="mb-2">${badgeHtml}</div>
+        <div class="text-[13px] text-red-400">Error: ${escapeHtml(res.error)}</div>
+      </div>`;
+    }
+    const data = res.data;
+    const g = (data.research_metadata || {}).guardrails || null;
+    const chip = confidenceChip(g);
+    const timeBadge = data.response_time_ms
+      ? `<span class="text-[11px] text-ink-600">${(data.response_time_ms / 1000).toFixed(1)}s</span>` : '';
+    const srcCount = (data.sources || []).length;
+    return `<div class="h-full bg-ink-950/60 border border-ink-800 rounded-xl p-3">
+      <div class="flex items-center flex-wrap gap-2 mb-2">${badgeHtml}${chip}${timeBadge}</div>
+      <div class="prose text-[13.5px] text-gray-200 max-h-[360px] overflow-y-auto">${linkifyCitations(marked.parse(data.answer || ''), data.sources)}</div>
+      <div class="text-[11px] text-ink-500 mt-2">${srcCount} source${srcCount === 1 ? '' : 's'}</div>
+    </div>`;
+  }
+
+  function wordCount(s) {
+    return (s || '').trim().split(/\s+/).filter(Boolean).length;
+  }
+
+  function stat(label, val, cls) {
+    return `<div class="flex flex-col">
+      <span class="text-[10px] uppercase tracking-wide text-ink-600">${label}</span>
+      <span class="text-[13px] font-semibold ${cls || 'text-gray-200'}">${val}</span>
+    </div>`;
+  }
+
+  // Coverage/breadth scoreboard + an adaptive plain-English verdict. Faithfulness is
+  // deliberately NOT shown as a headline delta: it saturates (~100% for both on KB
+  // lookups) and misleads. What actually separates the modes is *breadth* (sources,
+  // sub-questions, depth) and *speed* — so we surface those and tell the user which
+  // mode was the right call for THIS question.
+  function compareDelta(fast, deep) {
+    if (!fast.ok || !deep.ok) return '';
+    const f = fast.data, d = deep.data;
+    const ft = f.response_time_ms, dt = d.response_time_ms;
+    const fSrc = (f.sources || []).length, dSrc = (d.sources || []).length;
+    const fWords = wordCount(f.answer), dWords = wordCount(d.answer);
+    const subQ = ((d.research_metadata || {}).sub_queries || []).length;
+
+    const cells = [];
+    if (ft && dt) {
+      const x = (dt / ft).toFixed(1);
+      cells.push(stat('Speed', `Fast ${x}× faster`, 'text-amber-400'));
+    }
+    cells.push(stat('Sources', `${fSrc} vs ${dSrc}`, dSrc > fSrc ? 'text-violet-400' : 'text-gray-200'));
+    if (subQ) cells.push(stat('Sub-questions', `Deep explored ${subQ}`, 'text-violet-400'));
+    cells.push(stat('Depth', `${fWords} vs ${dWords} words`, dWords > fWords ? 'text-violet-400' : 'text-gray-200'));
+
+    // Adaptive takeaway: did Deep's extra cost actually buy meaningfully more?
+    const deepPaidOff = (fSrc && dSrc >= fSrc * 1.5) || (fWords && dWords >= fWords * 1.4);
+    const verdict = deepPaidOff
+      ? `<span class="text-violet-300 font-medium">Deep paid off here</span> — it pulled ${dSrc} sources${subQ ? ` across ${subQ} sub-questions` : ''} and produced a broader, more synthesised answer. Worth the wait for open-ended, comparative, or current-events questions.`
+      : `<span class="text-amber-300 font-medium">Fast was the right call here</span> — it delivered the same grounded answer in a fraction of the time. Deep's extra retrieval didn't add much for this direct lookup. Reach for Deep on broader, multi-hop, or "what's the latest" questions.`;
+
+    return `<div class="bg-ink-950/40 border border-ink-800 rounded-xl p-3">
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2.5">${cells.join('')}</div>
+      <div class="text-[12.5px] text-ink-300 leading-relaxed border-t border-ink-800 pt-2.5">${verdict}</div>
+    </div>`;
+  }
+
+  // Builds the comparison shell up front with two loading panes + an empty delta
+  // slot, returning the element IDs so compareModes() can fill each independently.
+  function addComparisonShell() {
+    dismissWelcome();
+    const container = $('messages');
+    const uid = 'cmp-' + Date.now();
+    const fastId = uid + '-fast', deepId = uid + '-deep', deltaId = uid + '-delta';
+    const el = document.createElement('div');
+    el.className = 'msg-enter flex justify-start';
+    el.innerHTML = `
+      <div class="max-w-full w-full">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="inline-flex items-center gap-1 text-[11px] font-medium text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded-full">⚖️ Mode comparison</span>
+        </div>
+        <div id="${deltaId}" class="mb-2.5"></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 items-stretch">
+          <div id="${fastId}">${comparePaneLoading(FAST_BADGE, 'Running Fast RAG…')}</div>
+          <div id="${deepId}">${comparePaneLoading(DEEP_BADGE, 'Running Deep Research — this can take 1–3 min…')}</div>
+        </div>
+      </div>`;
+    container.appendChild(el);
+    scrollToBottom();
+    return { fastId, deepId, deltaId };
   }
 
   // ── Messages ──

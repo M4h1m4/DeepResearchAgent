@@ -50,9 +50,11 @@ class Settings(BaseSettings):
     session_cleanup_interval_minutes: int = 60
 
     # Deep-research gap-analysis loop cap. Sub-query retrieval within each round runs
-    # in parallel, so each iteration is much faster than before; 3 keeps full multi-hop
-    # research depth. Lower to 1-2 if you want to trade depth for latency.
-    max_research_iterations: int = 3
+    # in parallel, but each round is still a fixed ~40s block (parallel web retrieval +
+    # full-context synthesis), so the round count is the dominant latency lever. 2 keeps
+    # genuine multi-hop depth (plan pass + one gap-driven follow-up) while cutting a whole
+    # ~40s block vs 3. Raise to 3 for maximum depth, lower to 1 for lowest latency.
+    max_research_iterations: int = 2
     deep_research_top_k: int = 6
     deep_research_temperature: float = 0.7
     research_planning_temperature: float = 0.3

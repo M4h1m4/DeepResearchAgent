@@ -15,6 +15,10 @@ class ResearchState(TypedDict):
 
     findings: Annotated[List[Dict], operator.add]
     synthesis: str
+    # How many findings have already been folded into `synthesis`. Lets
+    # synthesize_findings do INCREMENTAL synthesis — combine the running synthesis
+    # with only the new findings each round instead of re-processing the whole list.
+    synthesized_count: int
 
     knowledge_gaps: Annotated[List[str], operator.add]
 
