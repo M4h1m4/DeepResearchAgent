@@ -228,6 +228,10 @@ def generate_sub_query(state: ResearchState) -> Dict[str, Any]:
     if gaps:
         llm = _llm_for_state(state, settings.research_planning_temperature)
         gap_text = "\n".join(f"- {gap}" for gap in gaps[:3])
+        # (1) Tell the LLM what has already been researched so it doesn't re-ask the
+        # same questions in slightly different words. `planned` is the accumulated
+        # sub_queries list, so it holds every query from every prior iteration.
+        already_asked = "\n".join(f"- {q}" for q in planned) if planned else "(none yet)"
         prompt_text = f"""Based on these knowledge gaps, generate up to 3 focused, specific sub-queries to investigate them.
 
 Knowledge gaps:
@@ -235,7 +239,10 @@ Knowledge gaps:
 
 Original query: {state["query"]}
 
-Return ONLY a JSON array of sub-query strings, e.g. ["sub-query 1", "sub-query 2"]. Nothing else."""
+Already researched (do NOT repeat or rephrase these):
+{already_asked}
+
+Return ONLY a JSON array of NEW sub-query strings that are not covered above, e.g. ["sub-query 1", "sub-query 2"]. Nothing else."""
         try:
             messages = [
                 ("system", f"You are a research assistant that generates focused sub-queries. {_today_context()}"),
@@ -249,9 +256,15 @@ Return ONLY a JSON array of sub-query strings, e.g. ["sub-query 1", "sub-query 2
                 text = text.split("```")[1].split("```")[0].strip()
             new_queries = json.loads(text)
             new_queries = [q.strip() for q in new_queries if isinstance(q, str) and q.strip()][:3]
+            # (2) Belt-and-braces: drop any query that's already in the accumulated
+            # list (case-insensitive), so the operator.add reducer never grows the
+            # state with duplicates even if the LLM ignores the instruction above.
+            seen = {q.strip().lower() for q in planned}
+            new_queries = [q for q in new_queries if q.lower() not in seen]
             if new_queries:
                 logger.info("Gap sub-queries generated", extra={"count": len(new_queries)})
                 return {"sub_queries": new_queries}
+            logger.info("Gap sub-queries all duplicates — skipping", extra={"gaps": len(gaps)})
         except Exception as e:
             logger.warning("Gap sub-query generation failed — using original query", extra={"error": str(e)})
 
@@ -347,24 +360,29 @@ def execute_rag_tool(state: ResearchState) -> Dict[str, Any]:
     return {"findings": new_findings}
 
 def synthesize_findings(state: ResearchState) -> Dict[str, Any]:
-    #synthesize the findings into one from all rag_tool executions 
-    # OPTIMIZATION: Skip synthesis if we have planned queries and only 1 finding
-    # This reduces LLM calls - we'll synthesize after multiple findings or at the end
-    findings_count = len(state.get("findings", []))
+    # INCREMENTAL SYNTHESIS: the running `synthesis` already summarises everything
+    # researched in earlier rounds, so we fold in ONLY the findings gathered since the
+    # last synthesis rather than re-processing the whole (ever-growing) findings list.
+    # This keeps each round's synthesis prompt small and roughly constant instead of
+    # growing with total findings — the main per-iteration latency saving.
+    findings = state.get("findings", [])
+    already_synthesized = state.get("synthesized_count", 0)
+    new_findings = findings[already_synthesized:]
     remaining_queries = len(state.get("sub_queries", []))
-    
+
     logger.info(
         "Synthesizing findings",
         extra={
             "query": state["query"],
-            "findings_count": findings_count,
+            "findings_count": len(findings),
+            "new_findings": len(new_findings),
             "iteration": state["iteration_count"],
             "remaining_queries": remaining_queries,
             "node": "synthesize_findings"
         }
     )
 
-    if not state.get("findings"):
+    if not findings:
         logger.warning(
             "No findings to synthesize",
             extra={"query": state["query"]}
@@ -372,23 +390,14 @@ def synthesize_findings(state: ResearchState) -> Dict[str, Any]:
         return {
             "synthesis": "No findings available yet."
         }
-    
-    # OPTIMIZATION: Skip detailed synthesis if we have more queries to process
-    # Just concatenate findings for now, full synthesis happens at the end
-    if findings_count == 1 and remaining_queries > 0:
-        logger.debug(
-            "Skipping detailed synthesis - more queries to process",
-            extra={"findings_count": findings_count, "remaining_queries": remaining_queries}
-        )
-        # Quick concatenation instead of LLM synthesis
-        quick_synthesis = f"Finding: {state['findings'][0]['answer'][:500]}..."
-        return {
-            "synthesis": quick_synthesis
-        }
-    
+
+    # Nothing new since the last synthesis — carry it forward unchanged, no LLM call.
+    if not new_findings:
+        return {"synthesized_count": len(findings)}
+
     llm = _llm_for_state(state, settings.deep_research_temperature)
     findings_text = ""
-    for i, finding in enumerate(state["findings"], 1):
+    for i, finding in enumerate(new_findings, already_synthesized + 1):
         findings_text += f"\n\nFinding {i} (Query: {finding['query']}):\n"
         findings_text += f"Answer: {finding['answer']}\n"
         if finding.get("sources"):
@@ -404,47 +413,51 @@ def synthesize_findings(state: ResearchState) -> Dict[str, Any]:
                     source_strings.append(str(source))
             if source_strings:
                 findings_text += f"Sources: {', '.join(source_strings)}\n"
-    synthesis_prompt = f"""Synthesize the following research findings into a comprehensive,
-coherent answer to the original query. Combine information from all findings,
-resolve any contradictions, and create a well-structured response.
+    synthesis_prompt = f"""Update the running research summary by folding in the NEW findings below.
+This is an INTERNAL working note, not the final answer — keep it compact.
+
+The PREVIOUS SUMMARY already captures everything researched in earlier rounds. Merge the new
+findings into it, resolve contradictions, and keep the key facts already captured. The polished,
+comprehensive answer is written later in a separate step — do NOT write full prose here.
 
 Original query: {state["query"]}
 
-Research findings:
+Previous summary (already covers earlier findings):
+{state.get("synthesis") or "None yet — this is the first round."}
+
+New findings this round:
 {findings_text}
 
-Previous synthesis (if any):
-{state.get("synthesis", "None")}
+Produce an updated working summary that:
+1. Stays CONCISE — aim for ≤250 words, terse bullet-style facts, not an essay
+2. Captures the key facts needed to answer the query (retain earlier facts, add new ones)
+3. Keeps brief source references
+4. Explicitly lists any remaining gaps or unanswered questions
 
-Create a comprehensive synthesis that:
-1. Directly addresses the original query
-2. Incorporates information from all findings
-3. Maintains source citations
-4. Is well-structured and coherent
-5. Identifies any remaining gaps or unanswered questions
-
-Provide the synthesis now:"""
-    try: 
+Provide the updated working summary now:"""
+    try:
         messages = [
             ("system", f"You are a research synthesis assistant that combines findings into comprehensive answers. {_today_context()}"),
             ("human", synthesis_prompt),
         ]
         response = llm.invoke(messages)
         new_synthesis = response.content.strip()
-        
+
         logger.info(
             "Findings synthesized",
             extra={
                 "query": state["query"],
                 "synthesis_length": len(new_synthesis),
+                "new_findings": len(new_findings),
                 "iteration": state["iteration_count"]
             }
         )
-        
+
         return {
-            "synthesis": new_synthesis
+            "synthesis": new_synthesis,
+            "synthesized_count": len(findings),
         }
-        
+
     except Exception as e:
         logger.error(
             "Error synthesizing findings",
@@ -455,13 +468,17 @@ Provide the synthesis now:"""
             },
             exc_info=True
         )
-        # Fallback: concatenate findings
-        fallback_synthesis = "\n\n".join([
+        # Fallback: keep the previous synthesis and append the new findings verbatim,
+        # preserving incremental semantics so nothing gets re-synthesized next round.
+        prior = state.get("synthesis", "")
+        appended = "\n\n".join([
             f"Query: {f['query']}\nAnswer: {f['answer']}"
-            for f in state["findings"]
+            for f in new_findings
         ])
+        fallback_synthesis = f"{prior}\n\n{appended}".strip() if prior else appended
         return {
-            "synthesis": fallback_synthesis
+            "synthesis": fallback_synthesis,
+            "synthesized_count": len(findings),
         }
 
 

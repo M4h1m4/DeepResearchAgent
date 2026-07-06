@@ -80,10 +80,18 @@ class DeepResearchService:
                     elif not key:
                         unique_sources.append(s)
 
+            # (5) The sub_queries list is accumulated across iterations via an
+            # operator.add reducer, so it can carry near-identical repeats. Report a
+            # de-duplicated, order-preserving list so "Deep explored N" reflects the
+            # DISTINCT questions actually investigated.
+            _distinct_sub_queries = list(dict.fromkeys(
+                q for q in final_state.get("sub_queries", []) if q and q.strip()
+            ))
+
             result = {
                 "answer": final_state.get("final_answer") or final_state.get("synthesis", ""),
                 "research_plan": final_state.get("research_plan", ""),
-                "sub_queries": final_state.get("sub_queries", []),
+                "sub_queries": _distinct_sub_queries,
                 "findings": final_state.get("findings", []),
                 "synthesis": final_state.get("synthesis", ""),
                 "sources": unique_sources,
